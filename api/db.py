@@ -42,7 +42,9 @@ class AppRow(Base):
     # Canonical "current version" — the scan that was most recently submitted for
     # this app. Sticky: stays set across subsequent unsubmitted scans, only moves
     # when another scan is submitted. Nullable for apps that have never had a
-    # submission. use_alter avoids the apps<->scans circular FK on create_all.
+    # submission. use_alter breaks the apps<->scans circular FK for table
+    # ordering; the constraint itself is added explicitly in the initial
+    # Alembic migration (op.create_table skips use_alter FKs on PostgreSQL).
     current_scan_id: Mapped[Optional[str]] = mapped_column(
         String,
         ForeignKey(
@@ -155,7 +157,9 @@ def _database_url() -> str:
 
 
 def make_engine() -> AsyncEngine:
-    return create_async_engine(_database_url(), future=True)
+    # pool_pre_ping: pooled connections go stale when Postgres restarts or an
+    # idle timeout closes them; without it the next request fails.
+    return create_async_engine(_database_url(), future=True, pool_pre_ping=True)
 
 
 def make_session_factory(engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:
