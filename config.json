@@ -1,0 +1,32 @@
+{
+  "start_url": "https://example.com",
+  "max_depth": 3,
+  "max_clicks_per_page": 20,
+  "wait_timeout": 30000,
+  "network_idle_timeout": 2000,
+  "form_filling": {
+    "enabled": true,
+    "fill_delay": 100,
+    "defaults": {
+      "#email": "test@example.com"
+    }
+  },
+  "login": {
+    "login_url": "https://psso/realms/oauth",
+    "username_env": "APP_USERNAME",
+    "password_env": "APP_PASSWORD",
+    "username_selector": "#username",
+    "password_selector": "input[type='password']",
+    "submit_selector": "button[type='submit']",
+    "post_login_wait_ms": 3000,
+    "storage_state_path": "storage_state.json",
+    "reuse_storage_state": true
+  },
+  "exclude_patterns": [
+    "logout",
+    "delete",
+    "remove",
+    "login",
+    "signin"
+  ]
+}
