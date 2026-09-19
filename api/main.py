@@ -13,6 +13,7 @@ from .db import make_engine, make_session_factory, sweep_stale_scans
 from .routes_apps import router as apps_router
 from .routes_events import router as events_router
 from .routes_scans import router as scans_router
+from .routes_me import router as me_router
 from .sse import EventBus
 
 load_dotenv()
@@ -119,6 +120,7 @@ app.add_middleware(
 app.include_router(scans_router, prefix="/api")
 app.include_router(apps_router, prefix="/api")
 app.include_router(events_router, prefix="/api")
+app.include_router(me_router, prefix="/api")
 
 
 @app.get("/health")
