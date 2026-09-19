@@ -9,7 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from config_loader import Config, FormConfig, load_config
 
-from .db import init_db, make_engine, make_session_factory, sweep_stale_scans
+from .db import make_engine, make_session_factory, sweep_stale_scans
 from .routes_apps import router as apps_router
 from .routes_events import router as events_router
 from .routes_scans import router as scans_router
@@ -71,7 +71,6 @@ async def lifespan(app: FastAPI):
 
     engine = make_engine()
     session_factory = make_session_factory(engine)
-    await init_db(engine)
     app.state.engine = engine
     app.state.session_factory = session_factory
 

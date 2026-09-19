@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 from typing import AsyncIterator, Optional
 
 from sqlalchemy import (
+    BigInteger,
     Boolean,
     DateTime,
     ForeignKey,
@@ -10,10 +11,9 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
-    event,
     update,
 )
-from sqlalchemy.dialects.sqlite import JSON
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -132,47 +132,34 @@ class SubmissionRow(Base):
 
 class ScanEventRow(Base):
     __tablename__ = "scan_events"
-    __table_args__ = (
-        UniqueConstraint("scan_id", "seq", name="uq_scan_events_scan_seq"),
-    )
 
     scan_id: Mapped[str] = mapped_column(
         String, ForeignKey("scans.id", ondelete="CASCADE"), primary_key=True
     )
     seq: Mapped[int] = mapped_column(Integer, primary_key=True)
-    ts: Mapped[int] = mapped_column(Integer, nullable=False)
+    ts: Mapped[int] = mapped_column(BigInteger, nullable=False)
     type: Mapped[str] = mapped_column(String, nullable=False)
-    payload: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    payload: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)
 
     scan: Mapped[ScanRow] = relationship("ScanRow", back_populates="events")
 
 
 def _database_url() -> str:
-    explicit = os.environ.get("DATABASE_URL")
-    if explicit:
-        return explicit
-    path = os.environ.get("SCRAPER_SQLITE_PATH", "scraper.db")
-    return f"sqlite+aiosqlite:///{path}"
+    url = os.environ.get("DATABASE_URL")
+    if not url:
+        raise RuntimeError(
+            "DATABASE_URL is required "
+            "(example: postgresql+asyncpg://user:pass@host:5432/scraper)"
+        )
+    return url
 
 
 def make_engine() -> AsyncEngine:
-    engine = create_async_engine(_database_url(), future=True)
-    if engine.dialect.name == "sqlite":
-        @event.listens_for(engine.sync_engine, "connect")
-        def _enable_sqlite_foreign_keys(dbapi_connection, connection_record):
-            cursor = dbapi_connection.cursor()
-            cursor.execute("PRAGMA foreign_keys=ON")
-            cursor.close()
-    return engine
+    return create_async_engine(_database_url(), future=True)
 
 
 def make_session_factory(engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:
     return async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
-
-
-async def init_db(engine: AsyncEngine) -> None:
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
 
 
 async def sweep_stale_scans(session_factory: async_sessionmaker[AsyncSession]) -> int:

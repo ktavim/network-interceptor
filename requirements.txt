@@ -3,5 +3,6 @@ python-dotenv
 fastapi
 uvicorn[standard]
 sqlalchemy[asyncio]>=2.0
-aiosqlite
+asyncpg
+alembic>=1.13
 sse-starlette
