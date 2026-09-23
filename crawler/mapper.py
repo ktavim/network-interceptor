@@ -110,7 +110,6 @@ class Mapper:
 
         await self._ensure_authenticated(self.page)
 
-        self.interceptor.source_url = self.config.start_url
         await self._explore_page(self.page, 0)
 
         external_services = aggregate_by_origin(self.interceptor.get_requests())
@@ -179,7 +178,6 @@ class Mapper:
                     continue
 
             await self._log_click_target(element, i, len(clickable_elements), depth)
-            self.interceptor.source_url = page.url
 
             clicked = await self.navigator.click_element(page, element)
             if not clicked:
@@ -287,7 +285,6 @@ class Mapper:
                 pass
             logger.debug("  Clicking popup element: '%s'", label[:30])
 
-            self.interceptor.source_url = page.url
             await el.click(timeout=3000)
             await page.wait_for_timeout(self.config.network_idle_timeout)
 
@@ -322,8 +319,6 @@ class Mapper:
                         continue
                     if not self.navigator._should_follow_url(href):
                         continue
-
-                    self.interceptor.source_url = page.url
 
                     if await self.navigator.navigate_to(page, href, depth + 1):
                         saved_clicks = self.navigator.clicks_on_current_page

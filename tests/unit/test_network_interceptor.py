@@ -13,8 +13,7 @@ def interceptor():
 class TestHandleRequest:
     async def test_returns_expected_keys(self, interceptor, mock_request):
         req = mock_request("GET", headers={"authorization": "Bearer abc"})
-        interceptor.source_url = "http://example.com"
-        result = await interceptor.handle_request(req)
+        result = await interceptor.handle_request(req, "http://example.com")
         assert result["url"] == "http://api.example.com/v1/test"
         assert result["method"] == "GET"
         assert result["authentication"] == "bearer"
@@ -172,4 +171,3 @@ class TestInterceptorState:
 
     def test_initial_state(self, interceptor):
         assert interceptor.requests == []
-        assert interceptor.source_url == ""

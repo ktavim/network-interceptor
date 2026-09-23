@@ -1,5 +1,6 @@
 """Wire Playwright page/context events to the NetworkInterceptor, deduplicating by (method, URL)."""
 import logging
+from functools import partial
 
 from playwright.async_api import BrowserContext, Page
 
@@ -33,19 +34,22 @@ class RequestCapture:
         return (request.method, request.url)
 
     def _setup_page(self, target_page: Page) -> None:
-        target_page.on('request', self._on_request)
-        target_page.on('response', self._on_response)
-        target_page.on('requestfailed', self._on_request_failed)
-        target_page.on('requestfinished', self._on_request_finished)
+        # Each handler is bound to the page it listens on so it can read that
+        # page's URL at the moment the event fires: that is the page a captured
+        # request was issued from, including for pages opened in the context.
+        target_page.on('request', partial(self._on_request, page=target_page))
+        target_page.on('response', partial(self._on_response, page=target_page))
+        target_page.on('requestfailed', partial(self._on_request_failed, page=target_page))
+        target_page.on('requestfinished', partial(self._on_request_finished, page=target_page))
 
-    async def _on_request(self, request) -> None:
+    async def _on_request(self, request, page: Page) -> None:
         if not self._is_external_url(request.url):
             return
         key = self._key(request)
         if key not in self.pending_requests:
-            self.pending_requests[key] = await self.interceptor.handle_request(request)
+            self.pending_requests[key] = await self.interceptor.handle_request(request, page.url)
 
-    async def _on_response(self, response) -> None:
+    async def _on_response(self, response, page: Page) -> None:
         request = response.request
         if not self._is_external_url(request.url):
             return
@@ -55,7 +59,7 @@ class RequestCapture:
 
         request_data = self.pending_requests.get(key)
         if not request_data:
-            request_data = await self.interceptor.handle_request(request)
+            request_data = await self.interceptor.handle_request(request, page.url)
 
         try:
             await self.interceptor.handle_response(request_data, response)
@@ -65,28 +69,28 @@ class RequestCapture:
             self.captured_keys.add(key)
             self.pending_requests.pop(key, None)
 
-    async def _on_request_failed(self, request) -> None:
+    async def _on_request_failed(self, request, page: Page) -> None:
         if not self._is_external_url(request.url):
             return
         key = self._key(request)
         if key in self.captured_keys:
             return
 
-        request_data = await self.interceptor.handle_request(request)
+        request_data = await self.interceptor.handle_request(request, page.url)
         logger.debug("Request failed for %s %s: %s", request.method, request.url,
                      getattr(request, 'failure', None))
         request_data['status'] = 0
         self.interceptor.requests.append(request_data)
         self.captured_keys.add(key)
 
-    async def _on_request_finished(self, request) -> None:
+    async def _on_request_finished(self, request, page: Page) -> None:
         if not self._is_external_url(request.url):
             return
         key = self._key(request)
         if key in self.captured_keys:
             return
 
-        request_data = self.pending_requests.get(key) or await self.interceptor.handle_request(request)
+        request_data = self.pending_requests.get(key) or await self.interceptor.handle_request(request, page.url)
 
         try:
             response = await request.response()

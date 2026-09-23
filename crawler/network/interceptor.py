@@ -14,15 +14,19 @@ class NetworkInterceptor:
 
     def __init__(self):
         self.requests: List[Dict[str, Any]] = []
-        self.source_url: str = ""
 
-    async def handle_request(self, request: Request) -> Dict[str, Any]:
+    async def handle_request(self, request: Request, page_url: str) -> Dict[str, Any]:
+        """Build the capture record for `request`.
+
+        `page_url` is the URL of the page the request was issued from, read by
+        the caller at the moment the request event fires.
+        """
         return {
             'url': request.url,
             'method': request.method,
             'request_headers': request.headers,
             'resource_type': request.resource_type,
-            'source_url': self.source_url,
+            'source_url': page_url,
             'authentication': auth_analyzer.detect_authentication(request.headers, request.url),
         }
 
