@@ -36,16 +36,6 @@ def severity_for(auth_method: AuthMethod) -> Severity:
     return Severity.cleared
 
 
-def truncate_headers(headers: Dict[str, Any] | None, limit: int = 512) -> str:
-    if not headers:
-        return ""
-    parts = [f"{k}: {v}" for k, v in headers.items()]
-    text = "\n".join(parts)
-    if len(text) > limit:
-        return text[: limit - 1] + "…"
-    return text
-
-
 def service_to_finding_row(scan_id: str, service: Dict[str, Any]) -> Dict[str, Any]:
     """Convert a single aggregate_by_origin entry into a FindingRow-ready dict."""
     auth_method = tag_to_auth_method(service.get("authentication", ""))
