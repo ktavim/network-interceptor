@@ -120,7 +120,8 @@ class UrlRow(Base):
 
     Never carries post_data or request/response headers; aggregate_by_origin's
     _url_summary strips them before they get here. One row per capture, so a URL
-    can repeat within a finding (different method/status). No unique constraint.
+    can repeat within a finding (different method/status). No unique constraint
+    and no ordering column.
     """
     __tablename__ = "urls"
 
@@ -128,8 +129,6 @@ class UrlRow(Base):
     finding_id: Mapped[str] = mapped_column(
         String, ForeignKey("findings.id", ondelete="CASCADE"), index=True, nullable=False
     )
-    # 0-based capture order within the finding's origin.
-    seq: Mapped[int] = mapped_column(Integer, nullable=False)
     method: Mapped[str] = mapped_column(String, nullable=False)
     # Query string, fragment and userinfo stripped.
     url: Mapped[str] = mapped_column(String, nullable=False)

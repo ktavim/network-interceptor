@@ -87,10 +87,9 @@ _URL_ITEM = {
 
 
 class TestUrlToRow:
-    def test_links_finding_and_seq(self):
-        row = url_to_row("finding-1", 4, _URL_ITEM)
+    def test_links_finding(self):
+        row = url_to_row("finding-1", _URL_ITEM)
         assert row["finding_id"] == "finding-1"
-        assert row["seq"] == 4
         assert row["method"] == "GET"
         assert row["url"] == "https://api.example.com/v1/items"
         assert row["resource_type"] == "xhr"
@@ -108,11 +107,11 @@ class TestUrlToRow:
         ("something weird", AuthMethod.unknown),
     ])
     def test_auth_method_normalized(self, tag, expected):
-        row = url_to_row("finding-1", 0, {**_URL_ITEM, "authentication": tag})
+        row = url_to_row("finding-1", {**_URL_ITEM, "authentication": tag})
         assert row["auth_method"] == expected.value
 
     def test_defaults(self):
-        row = url_to_row("finding-1", 0, {"url": "https://a.com/x"})
+        row = url_to_row("finding-1", {"url": "https://a.com/x"})
         assert row["method"] == ""
         assert row["resource_type"] == ""
         assert row["status_code"] == 0
@@ -123,12 +122,12 @@ class TestUrlToRow:
 
     def test_missing_url_is_a_producer_bug(self):
         with pytest.raises(KeyError):
-            url_to_row("finding-1", 0, {"method": "GET"})
+            url_to_row("finding-1", {"method": "GET"})
 
     def test_row_keys_match_the_table(self):
         # api.service does UrlRow(**row): an unknown key would TypeError, and a
         # missing one would silently fall back to the column default.
-        row = url_to_row("finding-1", 0, _URL_ITEM)
+        row = url_to_row("finding-1", _URL_ITEM)
         assert set(row) == set(UrlRow.__table__.columns.keys())
 
 
@@ -156,10 +155,10 @@ class TestServicesToFindings:
         assert len(finding_rows) == 2
         assert len(url_rows) == 3
         by_host = {f["host"]: f["id"] for f in finding_rows}
-        assert [(u["finding_id"], u["seq"], u["url"]) for u in url_rows] == [
-            (by_host["a.com"], 0, "https://a.com/1"),
-            (by_host["a.com"], 1, "https://a.com/2"),
-            (by_host["b.com"], 0, "https://b.com/1"),
+        assert [(u["finding_id"], u["url"]) for u in url_rows] == [
+            (by_host["a.com"], "https://a.com/1"),
+            (by_host["a.com"], "https://a.com/2"),
+            (by_host["b.com"], "https://b.com/1"),
         ]
 
     def test_finding_row_has_no_urls_key(self):

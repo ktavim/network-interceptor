@@ -56,7 +56,7 @@ def service_to_finding_row(scan_id: str, service: Dict[str, Any]) -> Dict[str, A
     }
 
 
-def url_to_row(finding_id: str, seq: int, item: Dict[str, Any]) -> Dict[str, Any]:
+def url_to_row(finding_id: str, item: Dict[str, Any]) -> Dict[str, Any]:
     """Convert one aggregate_by_origin per-request summary into a UrlRow-ready dict.
 
     `url` is required: a summary without it is a producer bug, like a service
@@ -65,7 +65,6 @@ def url_to_row(finding_id: str, seq: int, item: Dict[str, Any]) -> Dict[str, Any
     return {
         "id": uuid.uuid4().hex,
         "finding_id": finding_id,
-        "seq": seq,
         "method": item.get("method", "") or "",
         "url": item["url"],
         "resource_type": item.get("resource_type", "") or "",
@@ -83,13 +82,13 @@ def services_to_findings(
     """(finding rows, url rows). Each url row carries the id of its finding row.
 
     Built in one pass because the url rows need the finding ids minted in
-    service_to_finding_row; `seq` restarts at 0 for every finding.
+    service_to_finding_row.
     """
     finding_rows: List[Dict[str, Any]] = []
     url_rows: List[Dict[str, Any]] = []
     for service in external_services:
         finding = service_to_finding_row(scan_id, service)
         finding_rows.append(finding)
-        for seq, item in enumerate(service.get("urls") or []):
-            url_rows.append(url_to_row(finding["id"], seq, item))
+        for item in service.get("urls") or []:
+            url_rows.append(url_to_row(finding["id"], item))
     return finding_rows, url_rows

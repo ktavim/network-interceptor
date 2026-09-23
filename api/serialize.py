@@ -50,7 +50,6 @@ def findings_to_schemas(rows: Iterable[FindingRow]) -> list[Finding]:
 def url_to_schema(row: UrlRow) -> Url:
     return Url(
         id=row.id,
-        seq=row.seq,
         method=row.method,
         url=row.url,
         resource_type=row.resource_type,

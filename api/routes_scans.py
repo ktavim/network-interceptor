@@ -184,11 +184,12 @@ async def list_finding_urls(scan_id: str, finding_id: str, request: Request) -> 
             raise HTTPException(status_code=404, detail={"message": "finding not found"})
         # Query the table directly rather than touching finding.urls: a lazy
         # relationship load inside an async session raises MissingGreenlet.
+        # Ids are random, so sort by (url, method) for a stable listing.
         rows = (
             await session.execute(
                 select(UrlRow)
                 .where(UrlRow.finding_id == finding_id)
-                .order_by(UrlRow.seq)
+                .order_by(UrlRow.url, UrlRow.method)
             )
         ).scalars().all()
         return [url_to_schema(r) for r in rows]

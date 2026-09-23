@@ -515,7 +515,7 @@ class TestAggregateByOriginUrls:
 
     def test_first_url_at_winning_rank_is_the_evidence_sample(self):
         # The entry's evidence comes from the first request at the winning rank;
-        # its position in `urls` (its seq once persisted) identifies that row.
+        # its position in `urls` identifies that row.
         reqs = [
             {"url": "http://a.com/1", "authentication": "unauthenticated", "status": 200},
             {"url": "http://a.com/2", "authentication": "basic", "status": 401},

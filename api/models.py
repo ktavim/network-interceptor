@@ -61,12 +61,11 @@ class Finding(BaseModel):
 
 
 class Url(BaseModel):
-    """One captured request behind a finding, in capture order (`seq`)."""
+    """One captured request behind a finding."""
 
     model_config = ConfigDict(use_enum_values=True)
 
     id: str
-    seq: int
     method: str
     url: str
     resource_type: str

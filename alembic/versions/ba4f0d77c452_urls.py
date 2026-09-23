@@ -23,7 +23,6 @@ def upgrade() -> None:
     op.create_table('urls',
     sa.Column('id', sa.String(), nullable=False),
     sa.Column('finding_id', sa.String(), nullable=False),
-    sa.Column('seq', sa.Integer(), nullable=False),
     sa.Column('method', sa.String(), nullable=False),
     sa.Column('url', sa.String(), nullable=False),
     sa.Column('resource_type', sa.String(), nullable=False),
