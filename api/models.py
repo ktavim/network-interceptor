@@ -60,6 +60,23 @@ class Finding(BaseModel):
     excluded: bool
 
 
+class Url(BaseModel):
+    """One captured request behind a finding, in capture order (`seq`)."""
+
+    model_config = ConfigDict(use_enum_values=True)
+
+    id: str
+    seq: int
+    method: str
+    url: str
+    resource_type: str
+    status_code: int
+    auth_method: AuthMethod
+    auth_challenge: Optional[str] = None
+    idp_redirect: Optional[str] = None
+    source_url: str
+
+
 class ScanSummary(BaseModel):
     model_config = ConfigDict(use_enum_values=True)
 

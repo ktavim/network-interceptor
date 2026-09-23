@@ -2,7 +2,7 @@
 from datetime import datetime, timezone
 from typing import Iterable, Optional
 
-from .db import AppRow, FindingRow, ScanRow
+from .db import AppRow, FindingRow, ScanRow, UrlRow
 from .models import (
     AppSummary,
     AuthMethod,
@@ -13,6 +13,7 @@ from .models import (
     ScanStatus,
     ScanSummary,
     Severity,
+    Url,
 )
 
 
@@ -44,6 +45,21 @@ def finding_to_schema(row: FindingRow) -> Finding:
 
 def findings_to_schemas(rows: Iterable[FindingRow]) -> list[Finding]:
     return [finding_to_schema(r) for r in rows]
+
+
+def url_to_schema(row: UrlRow) -> Url:
+    return Url(
+        id=row.id,
+        seq=row.seq,
+        method=row.method,
+        url=row.url,
+        resource_type=row.resource_type,
+        status_code=row.status_code,
+        auth_method=AuthMethod(row.auth_method),
+        auth_challenge=row.auth_challenge,
+        idp_redirect=row.idp_redirect,
+        source_url=row.source_url,
+    )
 
 
 def scan_to_summary(

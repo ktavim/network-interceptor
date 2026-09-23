@@ -2,7 +2,7 @@
 import base64
 import binascii
 from typing import Any, Dict, List, Optional
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlparse, urlsplit, urlunsplit
 
 from ..origin import Origin, origin_of
 
@@ -183,6 +183,37 @@ def _evidence_from(req: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _strip_url(url: str) -> str:
+    """The captured URL minus query, fragment and userinfo.
+
+    Nothing secret-bearing survives: query values carry API keys and tokens,
+    userinfo carries credentials, and a fragment is never sent to the server.
+    """
+    parts = urlsplit(url)
+    netloc = parts.netloc.rsplit('@', 1)[-1]
+    return urlunsplit((parts.scheme, netloc, parts.path, '', ''))
+
+
+def _url_summary(req: Dict[str, Any]) -> Dict[str, Any]:
+    """The persistable slice of one captured request: no body, no headers.
+
+    This is the row the API stores per request under a finding, so post_data,
+    request/response headers and transport errors are deliberately left out.
+    An external IdP login POST carries the real password in its body, and the
+    Authorization header carries live credentials.
+    """
+    return {
+        'method': req.get('method', '') or '',
+        'url': _strip_url(req.get('url', '') or ''),
+        'resource_type': req.get('resource_type', '') or '',
+        'status': int(req.get('status', 0) or 0),
+        'authentication': req.get('authentication', 'unauthenticated'),
+        'auth_challenge': req.get('auth_challenge') or None,
+        'idp_redirect': req.get('idp_redirect') or None,
+        'source_url': req.get('source_url', '') or '',
+    }
+
+
 # Origin-level ranking for aggregate_by_origin: when an origin is seen with more
 # than one authentication scheme across its requests, the highest-ranked scheme
 # becomes the origin's label. Ordered so the weakest/most-notable schemes (Basic,
@@ -232,6 +263,10 @@ def aggregate_by_origin(requests: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     Retains a representative evidence sample (request headers, response status,
     first source page) for the request whose authentication classification "wins"
     so the FE can render its `evidence` block.
+
+    Each entry also carries `urls`: the redacted per-request summaries
+    (_url_summary) of every request folded into it, in capture order, so
+    `request_count == len(urls)`. These become the finding's `urls` rows.
     """
     result_map: Dict[Origin, Dict[str, Any]] = {}
     for req in requests:
@@ -239,7 +274,8 @@ def aggregate_by_origin(requests: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         if origin is None:
             continue
 
-        current_auth = req.get('authentication', 'unauthenticated')
+        summary = _url_summary(req)
+        current_auth = summary['authentication']
 
         if origin not in result_map:
             entry = {
@@ -248,6 +284,7 @@ def aggregate_by_origin(requests: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 'port': origin.port,
                 'authentication': current_auth,
                 'request_count': 1,
+                'urls': [summary],
             }
             entry.update(_evidence_from(req))
             result_map[origin] = entry
@@ -255,6 +292,7 @@ def aggregate_by_origin(requests: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
         entry = result_map[origin]
         entry['request_count'] = int(entry.get('request_count', 1)) + 1
+        entry['urls'].append(summary)
 
         existing_auth = entry['authentication']
         # Rank by scheme (_auth_rank): the most notable auth seen on any of the

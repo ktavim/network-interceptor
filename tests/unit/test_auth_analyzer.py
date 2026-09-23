@@ -7,6 +7,8 @@ from crawler.network.auth_analyzer import (
     detect_auth_challenge,
     detect_idp_redirect,
     aggregate_by_origin,
+    _strip_url,
+    _url_summary,
 )
 
 
@@ -389,3 +391,137 @@ class TestAggregateByOrigin:
 
     def test_empty_input(self):
         assert aggregate_by_origin([]) == []
+
+
+class TestStripUrl:
+    def test_drops_query(self):
+        stripped = _strip_url("https://a.com/search?q=secret&api_key=abc123")
+        assert stripped == "https://a.com/search"
+        assert "secret" not in stripped
+        assert "abc123" not in stripped
+
+    def test_drops_fragment(self):
+        assert _strip_url("https://a.com/app#/route?x=1") == "https://a.com/app"
+
+    def test_drops_userinfo(self):
+        assert _strip_url("http://user:p%40ss@a.com/x") == "http://a.com/x"
+
+    def test_url_without_query_is_unchanged(self):
+        assert _strip_url("https://a.com/path/to/thing") == "https://a.com/path/to/thing"
+
+    def test_keeps_explicit_port_and_ipv6_brackets(self):
+        assert _strip_url("https://a.com:8443/x?y=1") == "https://a.com:8443/x"
+        assert _strip_url("http://[::1]:8080/x?y=1") == "http://[::1]:8080/x"
+
+
+# Every key the interceptor can put on a request, including the ones that must
+# never be persisted.
+_FULL_REQUEST = {
+    "url": "https://api.example.com/v1/items?token=secret",
+    "method": "POST",
+    "request_headers": {"authorization": "Bearer secret-token"},
+    "post_data": {"password": "hunter2"},
+    "resource_type": "xhr",
+    "source_url": "https://app.example.com/page",
+    "authentication": "bearer",
+    "status": 401,
+    "response_headers": {"www-authenticate": 'Basic realm="x"'},
+    "auth_challenge": 'Basic realm="x"',
+    "idp_redirect": "dev-1.okta.com",
+    "response_error": "boom",
+    "response_note": "note",
+}
+
+
+class TestUrlSummary:
+    def test_has_exactly_the_persistable_keys(self):
+        # The summary is what gets written to the urls table: bodies, headers and
+        # transport errors must never make it in.
+        summary = _url_summary(_FULL_REQUEST)
+        assert set(summary) == {
+            "method", "url", "resource_type", "status", "authentication",
+            "auth_challenge", "idp_redirect", "source_url",
+        }
+        assert "secret" not in repr(summary)
+        assert "hunter2" not in repr(summary)
+
+    def test_carries_fields(self):
+        summary = _url_summary(_FULL_REQUEST)
+        assert summary["method"] == "POST"
+        assert summary["url"] == "https://api.example.com/v1/items"
+        assert summary["resource_type"] == "xhr"
+        assert summary["status"] == 401
+        assert summary["authentication"] == "bearer"
+        assert summary["auth_challenge"] == 'Basic realm="x"'
+        assert summary["idp_redirect"] == "dev-1.okta.com"
+        assert summary["source_url"] == "https://app.example.com/page"
+
+    def test_defaults(self):
+        summary = _url_summary({"url": "http://a.com/x"})
+        assert summary["method"] == ""
+        assert summary["resource_type"] == ""
+        assert summary["status"] == 0
+        assert summary["authentication"] == "unauthenticated"
+        assert summary["auth_challenge"] is None
+        assert summary["idp_redirect"] is None
+        assert summary["source_url"] == ""
+
+    @pytest.mark.parametrize("status, expected", [(None, 0), ("404", 404), (200, 200)])
+    def test_status_coerced_to_int(self, status, expected):
+        assert _url_summary({"url": "http://a.com/x", "status": status})["status"] == expected
+
+    def test_empty_challenge_and_idp_become_none(self):
+        summary = _url_summary({"url": "http://a.com/x", "auth_challenge": "", "idp_redirect": ""})
+        assert summary["auth_challenge"] is None
+        assert summary["idp_redirect"] is None
+
+
+class TestAggregateByOriginUrls:
+    def test_urls_length_equals_request_count(self):
+        reqs = [
+            {"url": "http://a.com/1", "authentication": "unauthenticated"},
+            {"url": "http://a.com/2", "authentication": "unauthenticated"},
+            {"url": "http://a.com/3", "authentication": "bearer"},
+            {"url": "http://b.com/1", "authentication": "bearer"},
+        ]
+        by_host = {e["host"]: e for e in aggregate_by_origin(reqs)}
+        assert len(by_host["a.com"]["urls"]) == by_host["a.com"]["request_count"] == 3
+        assert len(by_host["b.com"]["urls"]) == by_host["b.com"]["request_count"] == 1
+
+    def test_urls_preserve_capture_order(self):
+        reqs = [
+            {"url": "http://a.com/1", "authentication": "unauthenticated"},
+            {"url": "http://b.com/1", "authentication": "unauthenticated"},
+            {"url": "http://a.com/2", "authentication": "unauthenticated"},
+        ]
+        by_host = {e["host"]: e for e in aggregate_by_origin(reqs)}
+        assert [u["url"] for u in by_host["a.com"]["urls"]] == ["http://a.com/1", "http://a.com/2"]
+        assert [u["url"] for u in by_host["b.com"]["urls"]] == ["http://b.com/1"]
+
+    def test_urls_are_stripped(self):
+        reqs = [{"url": "http://a.com/search?q=secret", "authentication": "unauthenticated"}]
+        result = aggregate_by_origin(reqs)
+        assert result[0]["urls"][0]["url"] == "http://a.com/search"
+
+    def test_requests_without_origin_are_not_listed(self):
+        reqs = [
+            {"url": "http://a.com/1", "authentication": "unauthenticated"},
+            {"url": "data:text/plain,hi", "authentication": "unauthenticated"},
+            {"url": "http://a.com/2", "authentication": "unauthenticated"},
+        ]
+        result = aggregate_by_origin(reqs)
+        assert len(result) == 1
+        assert [u["url"] for u in result[0]["urls"]] == ["http://a.com/1", "http://a.com/2"]
+
+    def test_first_url_at_winning_rank_is_the_evidence_sample(self):
+        # The entry's evidence comes from the first request at the winning rank;
+        # its position in `urls` (its seq once persisted) identifies that row.
+        reqs = [
+            {"url": "http://a.com/1", "authentication": "unauthenticated", "status": 200},
+            {"url": "http://a.com/2", "authentication": "basic", "status": 401},
+            {"url": "http://a.com/3", "authentication": "basic", "status": 403},
+        ]
+        entry = aggregate_by_origin(reqs)[0]
+        winners = [i for i, u in enumerate(entry["urls"]) if u["authentication"] == entry["authentication"]]
+        assert winners[0] == 1
+        assert entry["urls"][1]["status"] == entry["status_code"] == 401

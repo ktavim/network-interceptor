@@ -110,6 +110,38 @@ class FindingRow(Base):
     excluded: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
     scan: Mapped[ScanRow] = relationship("ScanRow", back_populates="findings")
+    urls: Mapped[list["UrlRow"]] = relationship(
+        "UrlRow", back_populates="finding", cascade="all, delete-orphan"
+    )
+
+
+class UrlRow(Base):
+    """One captured request behind a finding: per-request evidence, redacted.
+
+    Never carries post_data or request/response headers; aggregate_by_origin's
+    _url_summary strips them before they get here. One row per capture, so a URL
+    can repeat within a finding (different method/status). No unique constraint.
+    """
+    __tablename__ = "urls"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    finding_id: Mapped[str] = mapped_column(
+        String, ForeignKey("findings.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    # 0-based capture order within the finding's origin.
+    seq: Mapped[int] = mapped_column(Integer, nullable=False)
+    method: Mapped[str] = mapped_column(String, nullable=False)
+    # Query string, fragment and userinfo stripped.
+    url: Mapped[str] = mapped_column(String, nullable=False)
+    resource_type: Mapped[str] = mapped_column(String, default="", nullable=False)
+    status_code: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    # Always an AuthMethod value (tag_to_auth_method), like findings.auth_method.
+    auth_method: Mapped[str] = mapped_column(String, nullable=False)
+    auth_challenge: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    idp_redirect: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    source_url: Mapped[str] = mapped_column(String, default="", nullable=False)
+
+    finding: Mapped[FindingRow] = relationship("FindingRow", back_populates="urls")
 
 
 class SubmissionRow(Base):

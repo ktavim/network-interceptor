@@ -1,6 +1,6 @@
 """Translate raw scraper output into the frontend's domain model."""
 import uuid
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 
 from .models import AuthMethod, Severity
 
@@ -66,5 +66,40 @@ def service_to_finding_row(scan_id: str, service: Dict[str, Any]) -> Dict[str, A
     }
 
 
-def services_to_findings(scan_id: str, external_services: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    return [service_to_finding_row(scan_id, s) for s in external_services]
+def url_to_row(finding_id: str, seq: int, item: Dict[str, Any]) -> Dict[str, Any]:
+    """Convert one aggregate_by_origin per-request summary into a UrlRow-ready dict.
+
+    `url` is required: a summary without it is a producer bug, like a service
+    entry without its origin triple.
+    """
+    return {
+        "id": uuid.uuid4().hex,
+        "finding_id": finding_id,
+        "seq": seq,
+        "method": item.get("method", "") or "",
+        "url": item["url"],
+        "resource_type": item.get("resource_type", "") or "",
+        "status_code": int(item.get("status", 0) or 0),
+        "auth_method": tag_to_auth_method(item.get("authentication", "")).value,
+        "auth_challenge": item.get("auth_challenge") or None,
+        "idp_redirect": item.get("idp_redirect") or None,
+        "source_url": item.get("source_url", "") or "",
+    }
+
+
+def services_to_findings(
+    scan_id: str, external_services: List[Dict[str, Any]]
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """(finding rows, url rows). Each url row carries the id of its finding row.
+
+    Built in one pass because the url rows need the finding ids minted in
+    service_to_finding_row; `seq` restarts at 0 for every finding.
+    """
+    finding_rows: List[Dict[str, Any]] = []
+    url_rows: List[Dict[str, Any]] = []
+    for service in external_services:
+        finding = service_to_finding_row(scan_id, service)
+        finding_rows.append(finding)
+        for seq, item in enumerate(service.get("urls") or []):
+            url_rows.append(url_to_row(finding["id"], seq, item))
+    return finding_rows, url_rows

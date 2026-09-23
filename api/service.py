@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from config_loader import Config
 from crawler import Mapper
 
-from .db import FindingRow, ScanRow
+from .db import FindingRow, ScanRow, UrlRow
 from .models import Severity
 from .sse import EventBus
 from .translate import services_to_findings
@@ -40,13 +40,16 @@ async def _set_status(
 async def _persist_findings(
     session_factory: async_sessionmaker[AsyncSession],
     scan_id: str,
-    rows: list[Dict[str, Any]],
+    finding_rows: list[Dict[str, Any]],
+    url_rows: list[Dict[str, Any]],
 ) -> None:
-    if not rows:
-        return
+    if not finding_rows:
+        return  # url rows hang off findings, so there are none either
     async with session_factory() as session:
-        for r in rows:
-            session.add(FindingRow(**r))
+        # Findings first: urls.finding_id references them. One commit, so a
+        # scan never ends up with findings but no url evidence.
+        session.add_all([FindingRow(**r) for r in finding_rows])
+        session.add_all([UrlRow(**r) for r in url_rows])
         await session.commit()
 
 
@@ -85,8 +88,8 @@ async def run_scrape_job(
             external_services = result.get("external_services", [])
             pages_crawled = int(result.get("pages_crawled", 0) or 0)
 
-            finding_rows = services_to_findings(scan_id, external_services)
-            await _persist_findings(session_factory, scan_id, finding_rows)
+            finding_rows, url_rows = services_to_findings(scan_id, external_services)
+            await _persist_findings(session_factory, scan_id, finding_rows, url_rows)
 
             blockers = sum(1 for r in finding_rows if r["severity"] == Severity.blocker.value)
             for r in finding_rows:

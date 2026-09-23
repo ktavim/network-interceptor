@@ -9,7 +9,7 @@ from sqlalchemy import case, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from .db import AppRow, FindingRow, ScanRow, SubmissionRow
+from .db import AppRow, FindingRow, ScanRow, SubmissionRow, UrlRow
 from .models import (
     AuthMethod,
     CreateScanRequest,
@@ -20,9 +20,10 @@ from .models import (
     ScanSummary,
     Severity,
     SubmitScanResponse,
+    Url,
 )
 from .routes_me import _STUB_USER
-from .serialize import finding_to_schema, scan_to_detail, scan_to_summary
+from .serialize import finding_to_schema, scan_to_detail, scan_to_summary, url_to_schema
 from .service import run_scrape_job
 from .translate import severity_for
 
@@ -172,6 +173,25 @@ async def list_findings(scan_id: str, request: Request) -> List[Finding]:
             )
         ).scalars().all()
         return [finding_to_schema(r) for r in rows]
+
+
+@router.get("/scans/{scan_id}/findings/{finding_id}/urls", response_model=List[Url])
+async def list_finding_urls(scan_id: str, finding_id: str, request: Request) -> List[Url]:
+    factory = _session_factory(request)
+    async with factory() as session:
+        finding = await session.get(FindingRow, finding_id)
+        if not finding or finding.scan_id != scan_id:
+            raise HTTPException(status_code=404, detail={"message": "finding not found"})
+        # Query the table directly rather than touching finding.urls: a lazy
+        # relationship load inside an async session raises MissingGreenlet.
+        rows = (
+            await session.execute(
+                select(UrlRow)
+                .where(UrlRow.finding_id == finding_id)
+                .order_by(UrlRow.seq)
+            )
+        ).scalars().all()
+        return [url_to_schema(r) for r in rows]
 
 
 @router.post("/scans", response_model=CreateScanResponse)
