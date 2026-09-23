@@ -428,15 +428,13 @@ _FULL_REQUEST = {
     "response_headers": {"www-authenticate": 'Basic realm="x"'},
     "auth_challenge": 'Basic realm="x"',
     "idp_redirect": "dev-1.okta.com",
-    "response_error": "boom",
-    "response_note": "note",
 }
 
 
 class TestUrlSummary:
     def test_has_exactly_the_persistable_keys(self):
-        # The summary is what gets written to the urls table: bodies, headers and
-        # transport errors must never make it in.
+        # The summary is what gets written to the urls table: bodies and headers
+        # must never make it in.
         summary = _url_summary(_FULL_REQUEST)
         assert set(summary) == {
             "method", "url", "resource_type", "status", "authentication",

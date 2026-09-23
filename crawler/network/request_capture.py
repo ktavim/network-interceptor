@@ -73,10 +73,9 @@ class RequestCapture:
             return
 
         request_data = await self.interceptor.handle_request(request)
-        request_data.update({
-            'status': 0,
-            'response_error': 'Request failed',
-        })
+        logger.debug("Request failed for %s %s: %s", request.method, request.url,
+                     getattr(request, 'failure', None))
+        request_data['status'] = 0
         self.interceptor.requests.append(request_data)
         self.captured_keys.add(key)
 
@@ -96,22 +95,17 @@ class RequestCapture:
                     await self.interceptor.handle_response(request_data, response)
                 except Exception as body_error:
                     logger.warning("Could not read body for %s %s: %s", request.method, request.url, body_error)
-                    request_data.update({
-                        'status': getattr(response, 'status', 0),
-                        'response_error': f'Body not available: {body_error}',
-                    })
+                    request_data['status'] = getattr(response, 'status', 0)
                     self.interceptor.requests.append(request_data)
             else:
-                request_data.update({
-                    'status': 0,
-                    'response_note': 'Request finished but no response available',
-                })
+                logger.debug("Request finished but no response available for %s %s",
+                             request.method, request.url)
+                request_data['status'] = 0
                 self.interceptor.requests.append(request_data)
         except Exception as e:
-            request_data.update({
-                'status': 0,
-                'response_note': f'Request finished but response not accessible: {e}',
-            })
+            logger.debug("Request finished but response not accessible for %s %s: %s",
+                         request.method, request.url, e)
+            request_data['status'] = 0
             self.interceptor.requests.append(request_data)
         finally:
             self.captured_keys.add(key)

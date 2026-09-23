@@ -180,7 +180,6 @@ class TestHandleResponse:
         req_data = {"url": "http://a.com", "authentication": "unauthenticated"}
         result = await interceptor.handle_response(req_data, None)
         assert result["status"] == 0
-        assert "response_error" in result
 
     async def test_none_response_not_duplicated(self, interceptor):
         req_data = {"url": "http://a.com", "authentication": "unauthenticated"}

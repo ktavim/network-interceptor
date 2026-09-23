@@ -1,4 +1,6 @@
 """Tests for crawler.network.request_capture.RequestCapture."""
+import logging
+
 import pytest
 from unittest.mock import AsyncMock, MagicMock
 
@@ -106,12 +108,13 @@ class TestOnResponse:
 
 
 class TestOnRequestFailed:
-    async def test_records_failure(self, capture, interceptor, mock_request):
+    async def test_records_failure(self, capture, interceptor, mock_request, caplog):
         req = mock_request(url="http://api.example.com/v1")
-        await capture._on_request_failed(req)
+        with caplog.at_level(logging.DEBUG, logger="crawler.network.request_capture"):
+            await capture._on_request_failed(req)
         assert len(interceptor.requests) == 1
         assert interceptor.requests[0]["status"] == 0
-        assert interceptor.requests[0]["response_error"] == "Request failed"
+        assert "Request failed for GET http://api.example.com/v1" in caplog.text
 
     async def test_skips_internal(self, capture, interceptor, mock_request):
         req = mock_request(url="http://localhost:8080/x")
