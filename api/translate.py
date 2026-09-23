@@ -72,7 +72,7 @@ def url_to_row(finding_id: str, item: Dict[str, Any]) -> Dict[str, Any]:
         "auth_method": tag_to_auth_method(item.get("authentication", "")).value,
         "auth_challenge": item.get("auth_challenge") or None,
         "idp_redirect": item.get("idp_redirect") or None,
-        "source_url": item.get("source_url", "") or "",
+        "page_url": item.get("page_url", "") or "",
     }
 
 

@@ -76,7 +76,7 @@ class TestAttach:
         await _registered_handler(opened, "request")(mock_request(url="http://api.example.com/v1"))
 
         key = ("GET", "http://api.example.com/v1")
-        assert capture.pending_requests[key]["source_url"] == "http://localhost:8080/popup"
+        assert capture.pending_requests[key]["page_url"] == "http://localhost:8080/popup"
 
 
 class TestOnRequest:
@@ -100,7 +100,7 @@ class TestOnRequest:
         req = mock_request(url="http://api.example.com/v1")
         await capture._on_request(req, page=mock_page("http://localhost:8080/settings"))
         entry = capture.pending_requests[("GET", "http://api.example.com/v1")]
-        assert entry["source_url"] == "http://localhost:8080/settings"
+        assert entry["page_url"] == "http://localhost:8080/settings"
 
     async def test_page_url_is_read_when_the_request_fires(
         self, capture, interceptor, mock_request, mock_response, mock_page
@@ -116,7 +116,7 @@ class TestOnRequest:
         resp.request = req
         await capture._on_response(resp, page=page)
 
-        assert interceptor.requests[0]["source_url"] == "http://localhost:8080/home"
+        assert interceptor.requests[0]["page_url"] == "http://localhost:8080/home"
 
 
 class TestOnResponse:
@@ -147,7 +147,7 @@ class TestOnResponse:
         resp = mock_response(200)
         resp.request = req
         await capture._on_response(resp, page=mock_page("http://localhost:8080/late"))
-        assert interceptor.requests[0]["source_url"] == "http://localhost:8080/late"
+        assert interceptor.requests[0]["page_url"] == "http://localhost:8080/late"
 
     async def test_skips_already_captured(self, capture, interceptor, mock_request, mock_response, mock_page):
         capture.captured_keys.add(("GET", "http://api.example.com/v1"))
@@ -165,7 +165,7 @@ class TestOnRequestFailed:
             await capture._on_request_failed(req, page=mock_page("http://localhost:8080/home"))
         assert len(interceptor.requests) == 1
         assert interceptor.requests[0]["status"] == 0
-        assert interceptor.requests[0]["source_url"] == "http://localhost:8080/home"
+        assert interceptor.requests[0]["page_url"] == "http://localhost:8080/home"
         assert "Request failed for GET http://api.example.com/v1" in caplog.text
 
     async def test_skips_internal(self, capture, interceptor, mock_request, mock_page):

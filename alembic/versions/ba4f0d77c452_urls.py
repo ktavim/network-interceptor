@@ -30,7 +30,7 @@ def upgrade() -> None:
     sa.Column('auth_method', sa.String(), nullable=False),
     sa.Column('auth_challenge', sa.Text(), nullable=True),
     sa.Column('idp_redirect', sa.String(), nullable=True),
-    sa.Column('source_url', sa.String(), nullable=False),
+    sa.Column('page_url', sa.String(), nullable=False),
     sa.ForeignKeyConstraint(['finding_id'], ['findings.id'], ondelete='CASCADE'),
     sa.PrimaryKeyConstraint('id')
     )

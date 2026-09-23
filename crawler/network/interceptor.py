@@ -26,7 +26,7 @@ class NetworkInterceptor:
             'method': request.method,
             'request_headers': request.headers,
             'resource_type': request.resource_type,
-            'source_url': page_url,
+            'page_url': page_url,
             'authentication': auth_analyzer.detect_authentication(request.headers, request.url),
         }
 

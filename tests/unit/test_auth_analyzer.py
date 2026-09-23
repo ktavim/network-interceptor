@@ -421,7 +421,7 @@ _FULL_REQUEST = {
     "method": "POST",
     "request_headers": {"authorization": "Bearer secret-token"},
     "resource_type": "xhr",
-    "source_url": "https://app.example.com/page",
+    "page_url": "https://app.example.com/page",
     "authentication": "bearer",
     "status": 401,
     "response_headers": {"www-authenticate": 'Basic realm="x"'},
@@ -437,7 +437,7 @@ class TestUrlSummary:
         summary = _url_summary(_FULL_REQUEST)
         assert set(summary) == {
             "method", "url", "resource_type", "status", "authentication",
-            "auth_challenge", "idp_redirect", "source_url",
+            "auth_challenge", "idp_redirect", "page_url",
         }
         assert "secret" not in repr(summary)
 
@@ -450,7 +450,7 @@ class TestUrlSummary:
         assert summary["authentication"] == "bearer"
         assert summary["auth_challenge"] == 'Basic realm="x"'
         assert summary["idp_redirect"] == "dev-1.okta.com"
-        assert summary["source_url"] == "https://app.example.com/page"
+        assert summary["page_url"] == "https://app.example.com/page"
 
     def test_defaults(self):
         summary = _url_summary({"url": "http://a.com/x"})
@@ -460,7 +460,7 @@ class TestUrlSummary:
         assert summary["authentication"] == "unauthenticated"
         assert summary["auth_challenge"] is None
         assert summary["idp_redirect"] is None
-        assert summary["source_url"] == ""
+        assert summary["page_url"] == ""
 
     @pytest.mark.parametrize("status, expected", [(None, 0), ("404", 404), (200, 200)])
     def test_status_coerced_to_int(self, status, expected):

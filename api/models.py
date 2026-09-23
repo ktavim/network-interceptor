@@ -73,7 +73,7 @@ class Url(BaseModel):
     auth_method: AuthMethod
     auth_challenge: Optional[str] = None
     idp_redirect: Optional[str] = None
-    source_url: str
+    page_url: str
 
 
 class ScanSummary(BaseModel):

@@ -179,7 +179,7 @@ def _evidence_from(req: Dict[str, Any]) -> Dict[str, Any]:
     return {
         'headers_snippet': _format_headers_snippet(req.get('request_headers')),
         'status_code': int(req.get('status', 0) or 0),
-        'first_seen_on_page': req.get('source_url', '') or '',
+        'first_seen_on_page': req.get('page_url', '') or '',
     }
 
 
@@ -209,7 +209,7 @@ def _url_summary(req: Dict[str, Any]) -> Dict[str, Any]:
         'authentication': req.get('authentication', 'unauthenticated'),
         'auth_challenge': req.get('auth_challenge') or None,
         'idp_redirect': req.get('idp_redirect') or None,
-        'source_url': req.get('source_url', '') or '',
+        'page_url': req.get('page_url', '') or '',
     }
 
 
@@ -260,7 +260,7 @@ def aggregate_by_origin(requests: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     whose URL has no origin are skipped.
 
     Retains a representative evidence sample (request headers, response status,
-    first source page) for the request whose authentication classification "wins"
+    page first seen on) for the request whose authentication classification "wins"
     so the FE can render its `evidence` block.
 
     Each entry also carries `urls`: the redacted per-request summaries

@@ -138,7 +138,7 @@ class UrlRow(Base):
     auth_method: Mapped[str] = mapped_column(String, nullable=False)
     auth_challenge: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     idp_redirect: Mapped[Optional[str]] = mapped_column(String, nullable=True)
-    source_url: Mapped[str] = mapped_column(String, default="", nullable=False)
+    page_url: Mapped[str] = mapped_column(String, default="", nullable=False)
 
     finding: Mapped[FindingRow] = relationship("FindingRow", back_populates="urls")
 

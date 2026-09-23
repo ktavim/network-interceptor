@@ -82,7 +82,7 @@ _URL_ITEM = {
     "authentication": "basic",
     "auth_challenge": 'Basic realm="x"',
     "idp_redirect": None,
-    "source_url": "https://app.example.com/page",
+    "page_url": "https://app.example.com/page",
 }
 
 
@@ -97,7 +97,7 @@ class TestUrlToRow:
         assert row["auth_method"] == AuthMethod.basic.value
         assert row["auth_challenge"] == 'Basic realm="x"'
         assert row["idp_redirect"] is None
-        assert row["source_url"] == "https://app.example.com/page"
+        assert row["page_url"] == "https://app.example.com/page"
         assert row["id"]
 
     @pytest.mark.parametrize("tag, expected", [
@@ -118,7 +118,7 @@ class TestUrlToRow:
         assert row["auth_method"] == AuthMethod.unknown.value
         assert row["auth_challenge"] is None
         assert row["idp_redirect"] is None
-        assert row["source_url"] == ""
+        assert row["page_url"] == ""
 
     def test_missing_url_is_a_producer_bug(self):
         with pytest.raises(KeyError):

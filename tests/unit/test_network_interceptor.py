@@ -17,7 +17,7 @@ class TestHandleRequest:
         assert result["url"] == "http://api.example.com/v1/test"
         assert result["method"] == "GET"
         assert result["authentication"] == "bearer"
-        assert result["source_url"] == "http://example.com"
+        assert result["page_url"] == "http://example.com"
         assert result["resource_type"] == "fetch"
 
 
