@@ -1,5 +1,4 @@
 """Network request/response interceptor for Playwright."""
-import json
 import logging
 from typing import Any, Dict, List, Optional
 
@@ -22,7 +21,6 @@ class NetworkInterceptor:
             'url': request.url,
             'method': request.method,
             'request_headers': request.headers,
-            'post_data': await self._get_post_data(request),
             'resource_type': request.resource_type,
             'source_url': self.source_url,
             'authentication': auth_analyzer.detect_authentication(request.headers, request.url),
@@ -108,24 +106,6 @@ class NetworkInterceptor:
         for k, v in headers.items():
             if k.lower() == name.lower():
                 return v
-        return None
-
-    @staticmethod
-    async def _get_post_data(request: Request) -> Optional[Dict[str, Any]]:
-        if request.method not in ['POST', 'PUT', 'PATCH']:
-            return None
-        try:
-            post_data = request.post_data
-            if post_data:
-                try:
-                    return json.loads(post_data)
-                except json.JSONDecodeError:
-                    if 'application/x-www-form-urlencoded' in request.headers.get('content-type', ''):
-                        from urllib.parse import parse_qs
-                        return dict(parse_qs(post_data))
-                    return {'raw': post_data}
-        except Exception:
-            pass
         return None
 
     def get_requests(self) -> List[Dict[str, Any]]:

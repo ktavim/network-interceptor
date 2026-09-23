@@ -118,8 +118,8 @@ class FindingRow(Base):
 class UrlRow(Base):
     """One captured request behind a finding: per-request evidence, redacted.
 
-    Never carries post_data or request/response headers; aggregate_by_origin's
-    _url_summary strips them before they get here. One row per capture, so a URL
+    Never carries request/response headers; aggregate_by_origin's _url_summary
+    strips them before they get here. One row per capture, so a URL
     can repeat within a finding (different method/status). No unique constraint
     and no ordering column.
     """

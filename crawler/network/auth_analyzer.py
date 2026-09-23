@@ -195,12 +195,11 @@ def _strip_url(url: str) -> str:
 
 
 def _url_summary(req: Dict[str, Any]) -> Dict[str, Any]:
-    """The persistable slice of one captured request: no body, no headers.
+    """The persistable slice of one captured request: no headers.
 
-    This is the row the API stores per request under a finding, so post_data,
-    request/response headers and transport errors are deliberately left out.
-    An external IdP login POST carries the real password in its body, and the
-    Authorization header carries live credentials.
+    This is the row the API stores per request under a finding, so
+    request/response headers are deliberately left out:
+    the Authorization header carries live credentials.
     """
     return {
         'method': req.get('method', '') or '',

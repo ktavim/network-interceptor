@@ -420,7 +420,6 @@ _FULL_REQUEST = {
     "url": "https://api.example.com/v1/items?token=secret",
     "method": "POST",
     "request_headers": {"authorization": "Bearer secret-token"},
-    "post_data": {"password": "hunter2"},
     "resource_type": "xhr",
     "source_url": "https://app.example.com/page",
     "authentication": "bearer",
@@ -433,15 +432,14 @@ _FULL_REQUEST = {
 
 class TestUrlSummary:
     def test_has_exactly_the_persistable_keys(self):
-        # The summary is what gets written to the urls table: bodies and headers
-        # must never make it in.
+        # The summary is what gets written to the urls table: headers must never
+        # make it in.
         summary = _url_summary(_FULL_REQUEST)
         assert set(summary) == {
             "method", "url", "resource_type", "status", "authentication",
             "auth_challenge", "idp_redirect", "source_url",
         }
         assert "secret" not in repr(summary)
-        assert "hunter2" not in repr(summary)
 
     def test_carries_fields(self):
         summary = _url_summary(_FULL_REQUEST)

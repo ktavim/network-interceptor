@@ -10,53 +10,6 @@ def interceptor():
     return NetworkInterceptor()
 
 
-class TestGetPostData:
-    async def test_json_body(self, interceptor, mock_request):
-        req = mock_request("POST", post_data='{"k": "v"}', headers={"content-type": "application/json"})
-        assert await interceptor._get_post_data(req) == {"k": "v"}
-
-    async def test_form_urlencoded(self, interceptor, mock_request):
-        req = mock_request("POST", post_data="u=a&p=b",
-                           headers={"content-type": "application/x-www-form-urlencoded"})
-        result = await interceptor._get_post_data(req)
-        assert "u" in result and "p" in result
-
-    async def test_form_multiple_values(self, interceptor, mock_request):
-        req = mock_request("POST", post_data="t=a&t=b&t=c",
-                           headers={"content-type": "application/x-www-form-urlencoded"})
-        result = await interceptor._get_post_data(req)
-        assert len(result["t"]) == 3
-
-    async def test_raw_fallback(self, interceptor, mock_request):
-        req = mock_request("POST", post_data="plain",
-                           headers={"content-type": "text/plain"})
-        assert await interceptor._get_post_data(req) == {"raw": "plain"}
-
-    async def test_malformed_json_falls_to_raw(self, interceptor, mock_request):
-        req = mock_request("POST", post_data="{bad", headers={"content-type": "application/json"})
-        assert await interceptor._get_post_data(req) == {"raw": "{bad"}
-
-    async def test_get_returns_none(self, interceptor, mock_request):
-        assert await interceptor._get_post_data(mock_request("GET")) is None
-
-    async def test_delete_returns_none(self, interceptor, mock_request):
-        assert await interceptor._get_post_data(mock_request("DELETE", post_data='{"x":1}')) is None
-
-    async def test_none_post_data(self, interceptor, mock_request):
-        assert await interceptor._get_post_data(mock_request("POST", post_data=None)) is None
-
-    async def test_empty_post_data(self, interceptor, mock_request):
-        assert await interceptor._get_post_data(mock_request("POST", post_data="")) is None
-
-    async def test_put_json(self, interceptor, mock_request):
-        req = mock_request("PUT", post_data='{"u": true}', headers={"content-type": "application/json"})
-        assert await interceptor._get_post_data(req) == {"u": True}
-
-    async def test_patch_json(self, interceptor, mock_request):
-        req = mock_request("PATCH", post_data='{"f": "n"}', headers={"content-type": "application/json"})
-        assert await interceptor._get_post_data(req) == {"f": "n"}
-
-
 class TestHandleRequest:
     async def test_returns_expected_keys(self, interceptor, mock_request):
         req = mock_request("GET", headers={"authorization": "Bearer abc"})
