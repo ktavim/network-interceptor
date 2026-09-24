@@ -48,6 +48,7 @@ def url_to_schema(row: UrlRow) -> Url:
         resource_type=row.resource_type,
         status_code=row.status_code,
         auth_method=AuthMethod(row.auth_method),
+        sent_auth_scheme=row.sent_auth_scheme,
         auth_challenge=row.auth_challenge,
         idp_redirect=row.idp_redirect,
         page_url=row.page_url,

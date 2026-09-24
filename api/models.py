@@ -51,6 +51,7 @@ class Url(BaseModel):
     resource_type: str
     status_code: int
     auth_method: AuthMethod
+    sent_auth_scheme: Optional[str] = None
     auth_challenge: Optional[str] = None
     idp_redirect: Optional[str] = None
     page_url: str

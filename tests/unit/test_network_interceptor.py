@@ -17,8 +17,15 @@ class TestHandleRequest:
         assert result["url"] == "http://api.example.com/v1/test"
         assert result["method"] == "GET"
         assert result["authentication"] == "bearer"
+        assert result["sent_auth_scheme"] == "Bearer"
         assert result["page_url"] == "http://example.com"
         assert result["resource_type"] == "fetch"
+
+    async def test_sent_auth_scheme_is_none_without_authorization(self, interceptor, mock_request):
+        req = mock_request("GET", headers={"x-api-key": "k"})
+        result = await interceptor.handle_request(req, "http://example.com")
+        assert result["authentication"] == "api_key"
+        assert result["sent_auth_scheme"] is None
 
 
 class TestHandleResponse:

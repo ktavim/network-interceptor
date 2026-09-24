@@ -28,6 +28,9 @@ class NetworkInterceptor:
             'resource_type': request.resource_type,
             'page_url': page_url,
             'authentication': auth_analyzer.detect_authentication(request.headers, request.url),
+            # The scheme word the Authorization header carried, kept as
+            # evidence; the credentials after it never leave this record.
+            'sent_auth_scheme': auth_analyzer.sent_auth_scheme(request.headers),
         }
 
     async def handle_response(

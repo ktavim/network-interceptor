@@ -4,6 +4,7 @@ import base64
 import pytest
 from crawler.network.auth_analyzer import (
     detect_authentication,
+    sent_auth_scheme,
     detect_auth_challenge,
     detect_idp_redirect,
     aggregate_by_origin,
@@ -119,6 +120,67 @@ class TestDetectAuthentication:
 
     def test_non_matching_query_params(self):
         assert detect_authentication({}, "http://x?user=a&page=1") == "unauthenticated"
+
+
+class TestSentAuthScheme:
+    @pytest.mark.parametrize("value, scheme", [
+        ("Bearer abc.def.ghi", "Bearer"),
+        ("Basic dXNlcjpzZWNyZXQ=", "Basic"),
+        ("Negotiate TlRMTVNTUAAB", "Negotiate"),
+        ("NTLM TlRMTVNTUAAB", "NTLM"),
+        ('Digest username="u", realm="r", response="abc"', "Digest"),
+        ("AWS4-HMAC-SHA256 Credential=AKIA/s3/aws4_request, Signature=abc", "AWS4-HMAC-SHA256"),
+    ])
+    def test_keeps_only_the_scheme_word(self, value, scheme):
+        assert sent_auth_scheme({"authorization": value}) == scheme
+
+    def test_case_preserved_as_sent(self):
+        # Evidence, not classification: detect_authentication decides the label.
+        assert sent_auth_scheme({"authorization": "bearer abc"}) == "bearer"
+
+    def test_case_insensitive_header_key(self):
+        assert sent_auth_scheme({"Authorization": "Bearer abc"}) == "Bearer"
+
+    def test_no_header(self):
+        assert sent_auth_scheme({}) is None
+        assert sent_auth_scheme({"x-api-key": "k"}) is None
+
+    def test_empty_value(self):
+        assert sent_auth_scheme({"authorization": ""}) is None
+
+    def test_bare_credential_without_scheme_is_dropped(self):
+        # Some clients send the raw token as the whole header. With nothing
+        # after a space, the "first word" would be the secret itself.
+        jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.abc123"
+        assert sent_auth_scheme({"authorization": jwt}) is None
+        assert sent_auth_scheme({"authorization": "0123456789abcdef0123456789abcdef"}) is None
+
+    def test_scheme_without_credentials_is_dropped(self):
+        # Indistinguishable from a bare credential, so it is treated as one.
+        assert sent_auth_scheme({"authorization": "Bearer"}) is None
+
+    def test_empty_credentials_keep_the_scheme(self):
+        # "Bearer " is what detect_authentication classifies as bearer, too.
+        assert sent_auth_scheme({"authorization": "Bearer "}) == "Bearer"
+
+    def test_overlong_first_word_is_dropped(self):
+        # A secret followed by a space would otherwise pass as a "scheme".
+        assert sent_auth_scheme({"authorization": "a" * 33 + " x"}) is None
+        assert sent_auth_scheme({"authorization": "a" * 32 + " x"}) == "a" * 32
+
+    def test_non_token_first_word_is_dropped(self):
+        # '/' and '=' are not tchars: a base64 blob before a space is no scheme.
+        assert sent_auth_scheme({"authorization": "dXNl/cg== x"}) is None
+        assert sent_auth_scheme({"authorization": " Bearer x"}) is None
+
+    @pytest.mark.parametrize("value", [
+        "Bearer secret-token",
+        "Basic c2VjcmV0",
+        'Digest username="secret"',
+        "secret-token",
+    ])
+    def test_credentials_never_survive(self, value):
+        assert "secret" not in (sent_auth_scheme({"authorization": value}) or "")
 
 
 class TestDetectAuthChallenge:
@@ -412,6 +474,7 @@ _FULL_REQUEST = {
     "resource_type": "xhr",
     "page_url": "https://app.example.com/page",
     "authentication": "bearer",
+    "sent_auth_scheme": "Bearer",
     "status": 401,
     "response_headers": {"www-authenticate": 'Basic realm="x"'},
     "auth_challenge": 'Basic realm="x"',
@@ -426,7 +489,7 @@ class TestUrlSummary:
         summary = _url_summary(_FULL_REQUEST)
         assert set(summary) == {
             "method", "url", "resource_type", "status", "authentication",
-            "auth_challenge", "idp_redirect", "page_url",
+            "sent_auth_scheme", "auth_challenge", "idp_redirect", "page_url",
         }
         assert "secret" not in repr(summary)
 
@@ -437,6 +500,7 @@ class TestUrlSummary:
         assert summary["resource_type"] == "xhr"
         assert summary["status"] == 401
         assert summary["authentication"] == "bearer"
+        assert summary["sent_auth_scheme"] == "Bearer"
         assert summary["auth_challenge"] == 'Basic realm="x"'
         assert summary["idp_redirect"] == "dev-1.okta.com"
         assert summary["page_url"] == "https://app.example.com/page"
@@ -447,6 +511,7 @@ class TestUrlSummary:
         assert summary["resource_type"] == ""
         assert summary["status"] == 0
         assert summary["authentication"] == "unauthenticated"
+        assert summary["sent_auth_scheme"] is None
         assert summary["auth_challenge"] is None
         assert summary["idp_redirect"] is None
         assert summary["page_url"] == ""
@@ -455,8 +520,11 @@ class TestUrlSummary:
     def test_status_coerced_to_int(self, status, expected):
         assert _url_summary({"url": "http://a.com/x", "status": status})["status"] == expected
 
-    def test_empty_challenge_and_idp_become_none(self):
-        summary = _url_summary({"url": "http://a.com/x", "auth_challenge": "", "idp_redirect": ""})
+    def test_empty_challenge_idp_and_scheme_become_none(self):
+        summary = _url_summary({
+            "url": "http://a.com/x", "sent_auth_scheme": "", "auth_challenge": "", "idp_redirect": "",
+        })
+        assert summary["sent_auth_scheme"] is None
         assert summary["auth_challenge"] is None
         assert summary["idp_redirect"] is None
 

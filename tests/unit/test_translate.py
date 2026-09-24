@@ -80,6 +80,7 @@ _URL_ITEM = {
     "resource_type": "xhr",
     "status": 401,
     "authentication": "basic",
+    "sent_auth_scheme": "Basic",
     "auth_challenge": 'Basic realm="x"',
     "idp_redirect": None,
     "page_url": "https://app.example.com/page",
@@ -95,6 +96,7 @@ class TestUrlToRow:
         assert row["resource_type"] == "xhr"
         assert row["status_code"] == 401
         assert row["auth_method"] == AuthMethod.basic.value
+        assert row["sent_auth_scheme"] == "Basic"
         assert row["auth_challenge"] == 'Basic realm="x"'
         assert row["idp_redirect"] is None
         assert row["page_url"] == "https://app.example.com/page"
@@ -116,6 +118,7 @@ class TestUrlToRow:
         assert row["resource_type"] == ""
         assert row["status_code"] == 0
         assert row["auth_method"] == AuthMethod.unknown.value
+        assert row["sent_auth_scheme"] is None
         assert row["auth_challenge"] is None
         assert row["idp_redirect"] is None
         assert row["page_url"] == ""

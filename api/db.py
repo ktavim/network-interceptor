@@ -143,7 +143,8 @@ class UrlRow(Base):
     """One captured request behind a finding: per-request evidence, redacted.
 
     Never carries request/response headers; aggregate_by_origin's _url_summary
-    strips them before they get here. One row per capture, so a URL
+    strips them before they get here. The one header-derived value,
+    sent_auth_scheme, is the scheme word alone. One row per capture, so a URL
     can repeat within a finding (different method/status). No unique constraint
     and no ordering column.
     """
@@ -160,6 +161,12 @@ class UrlRow(Base):
     status_code: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     # Always an AuthMethod value (tag_to_auth_method), like findings.auth_method.
     auth_method: Mapped[str] = mapped_column(String, nullable=False)
+    # The auth-scheme word of the Authorization header the client sent
+    # ("Basic", "Digest", "Negotiate"), case as sent; NULL when none was. Only
+    # the scheme token is ever kept (auth_analyzer.sent_auth_scheme), never the
+    # credentials after it. With auth_challenge this records both sides of the
+    # exchange: what the client sent and what the server demanded.
+    sent_auth_scheme: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     auth_challenge: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     idp_redirect: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     page_url: Mapped[str] = mapped_column(String, default="", nullable=False)

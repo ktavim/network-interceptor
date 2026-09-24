@@ -1,6 +1,7 @@
 """Authentication detection: request headers, API keys, IdP redirects, auth challenges."""
 import base64
 import binascii
+import re
 from typing import Any, Dict, List, Optional
 from urllib.parse import parse_qs, urlparse, urlsplit, urlunsplit
 
@@ -38,6 +39,13 @@ def _classify_negotiate_token(token: str) -> str:
     return "negotiate"
 
 
+def _authorization_header(headers: Dict[str, str]) -> Optional[str]:
+    for k, v in headers.items():
+        if k.lower() == 'authorization':
+            return v
+    return None
+
+
 def detect_authentication(headers: Dict[str, str], url: str) -> str:
     """Detect the authentication method used in the request.
 
@@ -47,11 +55,7 @@ def detect_authentication(headers: Dict[str, str], url: str) -> str:
     carrying a real but unnamed scheme, e.g. Digest), or "unauthenticated" (no
     auth observed).
     """
-    auth_header = None
-    for k, v in headers.items():
-        if k.lower() == 'authorization':
-            auth_header = v
-            break
+    auth_header = _authorization_header(headers)
 
     if auth_header:
         if auth_header.startswith('Bearer '):
@@ -91,6 +95,43 @@ def detect_authentication(headers: Dict[str, str], url: str) -> str:
             return "api_key"
 
     return "unauthenticated"
+
+
+# An auth-scheme is an RFC 7235 token: one or more tchar (RFC 7230 s3.2.6).
+# Real scheme names are short words ("AWS4-HMAC-SHA256" is the longest in
+# common use); the length cap is a fence against a credential passing as one.
+_AUTH_SCHEME_RE = re.compile(r"([!#$%&'*+\-.^_`|~0-9A-Za-z]+)[ \t]")
+_MAX_AUTH_SCHEME_LEN = 32
+
+
+def sent_auth_scheme(headers: Dict[str, str]) -> Optional[str]:
+    """The auth-scheme word of the request's Authorization header, as sent.
+
+    Value-free by construction: only the leading scheme token is kept and
+    everything after the first whitespace -- the credentials -- is dropped,
+    so no per-scheme grammar is needed and none can be got wrong. Case is
+    preserved: this is evidence of what the client sent ("Basic", "Digest",
+    "Negotiate"), not a classification -- detect_authentication decides the
+    label, and this word survives where the label can't tell (an "other"
+    scheme's actual name; NTLM raw vs. wrapped in Negotiate; the scheme a
+    401 rejected, which the challenge then relabels).
+
+    None when no Authorization header was sent, and also when its value is a
+    single word with nothing after it: some clients send a raw JWT or API key
+    as the whole header, and that word would be the secret itself. A leading
+    word that isn't a token, or is longer than any real scheme name, is
+    likewise treated as a credential and dropped.
+    """
+    value = _authorization_header(headers)
+    if not value:
+        return None
+    match = _AUTH_SCHEME_RE.match(value)
+    if match is None:
+        return None
+    scheme = match.group(1)
+    if len(scheme) > _MAX_AUTH_SCHEME_LEN:
+        return None
+    return scheme
 
 
 def detect_auth_challenge(challenge: str) -> str:
@@ -180,7 +221,9 @@ def _url_summary(req: Dict[str, Any]) -> Dict[str, Any]:
 
     This is the row the API stores per request under a finding, so
     request/response headers are deliberately left out:
-    the Authorization header carries live credentials.
+    the Authorization header carries live credentials. The one value derived
+    from it, `sent_auth_scheme`, is the scheme word alone (see
+    sent_auth_scheme), never the credentials after it.
     """
     return {
         'method': req.get('method', '') or '',
@@ -188,6 +231,7 @@ def _url_summary(req: Dict[str, Any]) -> Dict[str, Any]:
         'resource_type': req.get('resource_type', '') or '',
         'status': int(req.get('status', 0) or 0),
         'authentication': req.get('authentication', 'unauthenticated'),
+        'sent_auth_scheme': req.get('sent_auth_scheme') or None,
         'auth_challenge': req.get('auth_challenge') or None,
         'idp_redirect': req.get('idp_redirect') or None,
         'page_url': req.get('page_url', '') or '',
