@@ -79,13 +79,14 @@ class TestHandleResponse:
     async def test_401_multiple_challenges(self, interceptor, mock_response):
         # IIS Windows Authentication sends Negotiate and NTLM as two headers;
         # Playwright's response.headers joins repeated headers with ", ", so
-        # they arrive as one list. The label is the most notable scheme offered
-        # and the evidence keeps the whole list.
+        # they arrive as one list. The label is the most favorable scheme
+        # offered, since the server takes either; the evidence keeps the whole
+        # list so the NTLM offer stays visible.
         req_data = {"url": "http://a.com", "authentication": "unauthenticated"}
         result = await interceptor.handle_response(
             req_data, mock_response(401, {"www-authenticate": "Negotiate, NTLM"})
         )
-        assert result["authentication"] == "ntlm"
+        assert result["authentication"] == "negotiate"
         assert result["auth_challenge"] == "Negotiate, NTLM"
 
     async def test_401_ntlm_handshake_continuation_stays_ntlm(self, interceptor, mock_response):

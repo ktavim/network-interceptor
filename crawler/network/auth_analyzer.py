@@ -295,19 +295,22 @@ def _challenge_tag(scheme: str, token68: Optional[str]) -> str:
 
 
 def detect_auth_challenge(challenge: str) -> str:
-    """Resolve a WWW-Authenticate value to the scheme the server demanded.
+    """Resolve a WWW-Authenticate value to the most favorable scheme it offers.
 
     The value may hold several challenges: RFC 7235 lets a server list them
     comma-separated, and Playwright's response.headers joins repeated
     WWW-Authenticate headers into one such list, so two headers and one
     multi-challenge header arrive here in the same shape. Every challenge is
     parsed (_parse_challenges) and tagged (_challenge_tag), and the tag that
-    ranks highest in _AUTH_RANK wins. A server offering "Negotiate, NTLM"
-    (IIS Windows Authentication's default) or "Bearer, Basic" accepts the
-    weaker scheme, and that acceptance -- not the preference its ordering
-    states -- is the finding; this is the rule aggregate_by_origin already
-    applies across an origin's requests, applied within one response. Ties
-    keep the server's order.
+    ranks lowest in _AUTH_RANK wins: the server accepts any one of the
+    schemes it lists, so whoever fronts the endpoint can pick the most
+    favorable one. "Bearer, Basic" is publishable with Bearer, and
+    "Negotiate, NTLM" (IIS Windows Authentication's default) is publishable
+    through Negotiate; neither is a blocker for also accepting the weaker
+    scheme. This is the opposite direction from aggregate_by_origin, where
+    every URL must work and the least favorable one decides. Ties keep the
+    server's order. The schemes not chosen stay visible in the raw challenge
+    the caller keeps as evidence.
 
     Only the scheme (and a Negotiate token68) is examined; parameters such as
     realm are left to the caller to retain as evidence. An unnamed scheme
@@ -317,7 +320,7 @@ def detect_auth_challenge(challenge: str) -> str:
     tags = [_challenge_tag(scheme, token68) for scheme, token68 in _parse_challenges(challenge or "")]
     if not tags:
         return "other"
-    return max(tags, key=_auth_rank)
+    return min(tags, key=_auth_rank)
 
 
 # Host substrings that identify a third-party Identity Provider. Matching is by
@@ -404,12 +407,14 @@ def _url_summary(req: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-# Origin-level ranking for aggregate_by_origin: when an origin is seen with more
-# than one authentication scheme across its requests, the highest-ranked scheme
-# becomes the origin's label. Ordered so the weakest/most-notable schemes (Basic,
-# NTLM) rank highest and "no auth observed" ranks lowest; a 401 challenge ranks as
-# the most notable scheme it demanded, so a demanded Basic/NTLM is never masked by
-# an accepted credential on another endpoint of the same origin.
+# Ranking shared by the two aggregations, which read it in opposite directions.
+# Ordered so the weakest/most-notable schemes (Basic, NTLM) rank highest and "no
+# auth observed" ranks lowest. aggregate_by_origin takes the maximum over an
+# origin's requests: every URL must be publishable, so an origin is as hard as
+# its hardest URL, and a URL that only takes Basic/NTLM is never masked by an
+# accepted credential elsewhere on the origin. detect_auth_challenge takes the
+# minimum over one response's challenges: the server accepts any one of them,
+# so an endpoint is as easy as its most favorable offer.
 _AUTH_RANK = {
     "basic": 8,
     "ntlm": 8,
@@ -435,9 +440,11 @@ def _auth_rank(value: str) -> int:
     A scheme the server demanded therefore counts the same as one actually
     observed. Both an unnamed 401 challenge and an Authorization header carrying an
     unnamed scheme surface as "other", which ranks just above the "unknown"
-    fallback (reached only by a tag outside the set). "other" still sits below
-    negotiate and the blockers, so it never masks a more-notable demanded scheme,
-    and (like every named scheme) outranks unauthenticated.
+    fallback (reached only by a tag outside the set). Read upward for an origin,
+    "other" sits below negotiate and the blockers, so it never masks a
+    more-notable scheme on another URL, and (like every named scheme) outranks
+    unauthenticated. Read downward within one response (detect_auth_challenge),
+    it beats negotiate but loses to every named publishable scheme.
     """
     return _AUTH_RANK.get((value or "").strip().lower(), _AUTH_RANK["unknown"])
 

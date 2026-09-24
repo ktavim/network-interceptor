@@ -8,6 +8,7 @@ from crawler.network.auth_analyzer import (
     detect_auth_challenge,
     detect_idp_redirect,
     aggregate_by_origin,
+    _parse_challenges,
     _strip_url,
     _url_summary,
 )
@@ -238,56 +239,69 @@ class TestDetectAuthChallenge:
 
     @pytest.mark.parametrize("challenge,expected", [
         # IIS Windows Authentication's default: Negotiate and NTLM as two
-        # headers, which Playwright joins into one comma-separated value.
-        ("Negotiate, NTLM", "ntlm"),
-        # The server lists its preferred scheme first; the weaker one it also
-        # accepts is the finding, whichever side of the comma it is on.
-        ('Bearer realm="api", Basic realm="api"', "basic"),
-        ('Basic realm="api", Bearer realm="api"', "basic"),
-        # RFC 7235's own multi-challenge example (quoted-pair inside a value).
-        ('Newauth realm="apps", type=1, title="Login to \\"apps\\"", Basic realm="simple"', "basic"),
+        # headers, which Playwright joins into one comma-separated value. The
+        # server takes either, so the endpoint is publishable through
+        # Negotiate and the NTLM offer does not make it a blocker.
+        ("Negotiate, NTLM", "negotiate"),
+        # An endpoint that takes Bearer as well as Basic is publishable with
+        # Bearer, whichever side of the comma each is on.
+        ('Bearer realm="api", Basic realm="api"', "bearer"),
+        ('Basic realm="api", Bearer realm="api"', "bearer"),
         # Empty list elements and odd whitespace are legal.
-        ("Negotiate,, NTLM", "ntlm"),
-        ("Negotiate ,NTLM", "ntlm"),
-        ("  Negotiate\t,\tNTLM  ", "ntlm"),
+        ("Negotiate,, NTLM", "negotiate"),
+        ("Negotiate ,NTLM", "negotiate"),
+        ("  Negotiate\t,\tNTLM  ", "negotiate"),
     ])
-    def test_multiple_challenges_pick_most_notable(self, challenge, expected):
+    def test_multiple_challenges_pick_most_favorable(self, challenge, expected):
         assert detect_auth_challenge(challenge) == expected
 
     def test_ties_keep_server_order(self):
         assert detect_auth_challenge("Basic, NTLM") == "basic"
         assert detect_auth_challenge("NTLM, Basic") == "ntlm"
 
-    def test_selection_follows_auth_rank(self):
-        # The pick is _auth_rank's, not a challenge-specific table: an unnamed
-        # scheme outranks bearer there, so it wins here too -- the same rule
-        # aggregate_by_origin applies across an origin's requests.
-        assert detect_auth_challenge('Bearer realm="a", Digest realm="a"') == "other"
-        assert detect_auth_challenge('Digest realm="a", Negotiate') == "negotiate"
+    def test_selection_reads_auth_rank_downward(self):
+        # Within one response any offered scheme suffices, so the lowest rank
+        # wins -- the opposite direction from aggregate_by_origin, where every
+        # URL must work and the highest rank wins. The table is shared, so an
+        # unnamed scheme loses to bearer here but beats negotiate.
+        assert detect_auth_challenge('Bearer realm="a", Digest realm="a"') == "bearer"
+        assert detect_auth_challenge('Digest realm="a", Negotiate') == "other"
 
+    def test_rfc7235_example_parses_both_challenges(self):
+        # RFC 7235's own multi-challenge example, quoted-pair included.
+        challenge = 'Newauth realm="apps", type=1, title="Login to \\"apps\\"", Basic realm="simple"'
+        assert _parse_challenges(challenge) == [("Newauth", None), ("Basic", None)]
+        assert detect_auth_challenge(challenge) == "other"
+
+    # Under the lowest-rank rule a spurious extra challenge -- tagged "other"
+    # -- would beat basic or ntlm but lose to bearer, so these cases lead with
+    # a blocker: a mis-split shows up as a changed label.
     @pytest.mark.parametrize("challenge,expected", [
         # A comma inside a quoted parameter does not split the list.
         ('Basic realm="a, b"', "basic"),
-        ('Bearer realm="a, NTLM"', "bearer"),
+        ('NTLM realm="a, Bearer"', "ntlm"),
         # An escaped quote does not close the quoted string.
-        ('Bearer realm="a\\"b, NTLM"', "bearer"),
+        ('NTLM realm="a\\"b, Bearer"', "ntlm"),
         # A comma followed by name=value continues the same challenge.
         ("Basic realm=x, charset=UTF-8", "basic"),
-        ('Bearer realm="x", error="invalid_token", error_description="a, b"', "bearer"),
-        ('Bearer realm = "x" , scope = "a b"', "bearer"),
+        ('Basic realm="x", charset="UTF-8", title="a, b"', "basic"),
+        ('Basic realm = "x" , charset = "UTF-8"', "basic"),
     ])
     def test_parameters_are_not_challenges(self, challenge, expected):
         assert detect_auth_challenge(challenge) == expected
 
-    @pytest.mark.parametrize("challenge,expected", [
-        # token68 padding is not the "=" of an auth-param.
-        ("Negotiate YIIC==, NTLM", "ntlm"),
-        ("NTLM TlRMTVNTUAAC, Negotiate", "ntlm"),
-        ("Negotiate YIIC==", "negotiate"),
-        ("Negotiate YIIC=, Basic realm=x", "basic"),
-    ])
-    def test_token68(self, challenge, expected):
-        assert detect_auth_challenge(challenge) == expected
+    def test_token68_is_not_a_parameter(self):
+        # token68 padding is not the "=" of an auth-param, and the list still
+        # splits after it.
+        assert _parse_challenges("Negotiate YIIC==, NTLM") == [("Negotiate", "YIIC=="), ("NTLM", None)]
+        assert _parse_challenges("Negotiate YIIC=, Basic realm=x") == [("Negotiate", "YIIC="), ("Basic", None)]
+        assert _parse_challenges("NTLM TlRMTVNTUAAC") == [("NTLM", "TlRMTVNTUAAC")]
+        # A param is not a token68: "=" and a value follow the word.
+        assert _parse_challenges("Basic realm=x") == [("Basic", None)]
+        # The token68 reaches the mechanism sniff: with NTLM in flight the
+        # Negotiate challenge ties with Basic and server order decides.
+        assert detect_auth_challenge("Negotiate TlRMTVNTUAAC, Basic realm=x") == "ntlm"
+        assert detect_auth_challenge("Negotiate YIIC==, NTLM") == "negotiate"
 
     def test_negotiate_token_resolves_the_mechanism_in_flight(self):
         # A 401 "Negotiate <token>" is the server's handshake continuation, and
@@ -322,7 +336,8 @@ class TestDetectAuthChallenge:
 
     def test_malformed_element_does_not_hide_its_neighbours(self):
         assert detect_auth_challenge('"garbage", Basic realm=x') == "basic"
-        assert detect_auth_challenge('Bearer realm="x", =, NTLM') == "ntlm"
+        assert detect_auth_challenge('NTLM, =, Bearer realm="x"') == "bearer"
+        assert _parse_challenges('NTLM, =, Bearer realm="x"') == [("NTLM", None), ("Bearer", None)]
 
 
 class TestDetectIdpRedirect:
