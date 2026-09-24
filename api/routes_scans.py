@@ -9,7 +9,14 @@ from sqlalchemy import case, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from .db import AppRow, FindingRow, ScanRow, SubmissionRow, UrlRow
+from .db import (
+    AppRow,
+    FindingRow,
+    ScanRow,
+    SubmissionRow,
+    UrlRow,
+    select_findings_with_evidence,
+)
 from .models import (
     AuthMethod,
     CreateScanRequest,
@@ -165,14 +172,13 @@ async def list_findings(scan_id: str, request: Request) -> List[Finding]:
         scan = await session.get(ScanRow, scan_id)
         if not scan:
             raise HTTPException(status_code=404, detail={"message": "scan not found"})
-        rows = (
+        pairs = (
             await session.execute(
-                select(FindingRow)
-                .where(FindingRow.scan_id == scan_id)
+                select_findings_with_evidence(scan_id)
                 .order_by(FindingRow.host, FindingRow.port, FindingRow.scheme)
             )
-        ).scalars().all()
-        return [finding_to_schema(r) for r in rows]
+        ).all()
+        return [finding_to_schema(finding, evidence) for finding, evidence in pairs]
 
 
 @router.get("/scans/{scan_id}/findings/{finding_id}/urls", response_model=List[Url])
@@ -322,7 +328,12 @@ async def patch_finding(
 
         await session.commit()
         await session.refresh(finding)
-        return finding_to_schema(finding)
+        evidence = (
+            await session.get(UrlRow, finding.evidence_url_id)
+            if finding.evidence_url_id
+            else None
+        )
+        return finding_to_schema(finding, evidence)
 
 
 @router.post("/scans/{scan_id}/submit", response_model=SubmitScanResponse)

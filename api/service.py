@@ -46,7 +46,9 @@ async def _persist_findings(
     if not finding_rows:
         return  # url rows hang off findings, so there are none either
     async with session_factory() as session:
-        # Findings first: urls.finding_id references them. One commit, so a
+        # Findings first: urls.finding_id references them. The pointer back,
+        # findings.evidence_url_id, is a deferred constraint, so it may name a
+        # url row that lands later in the same transaction. One commit, so a
         # scan never ends up with findings but no url evidence.
         session.add_all([FindingRow(**r) for r in finding_rows])
         session.add_all([UrlRow(**r) for r in url_rows])

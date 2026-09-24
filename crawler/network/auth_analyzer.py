@@ -73,8 +73,7 @@ def detect_authentication(headers: Dict[str, str], url: str) -> str:
         # A present Authorization header with an unrecognized scheme (e.g. Digest)
         # is a real but unnamed mechanism, not an absence of signal -- classify it
         # as "other", mirroring detect_auth_challenge's "other" handling
-        # of an unnamed WWW-Authenticate challenge. The raw scheme still survives in
-        # the finding's headers_snippet evidence.
+        # of an unnamed WWW-Authenticate challenge.
         return "other"
 
     api_key_headers = [
@@ -165,24 +164,6 @@ def detect_idp_redirect(location: str) -> Optional[str]:
         return None
 
 
-def _format_headers_snippet(headers: Dict[str, Any] | None, limit: int = 512) -> str:
-    if not headers:
-        return ""
-    parts = [f"{k}: {v}" for k, v in headers.items()]
-    text = "\n".join(parts)
-    if len(text) > limit:
-        return text[: limit - 1] + "…"
-    return text
-
-
-def _evidence_from(req: Dict[str, Any]) -> Dict[str, Any]:
-    return {
-        'headers_snippet': _format_headers_snippet(req.get('request_headers')),
-        'status_code': int(req.get('status', 0) or 0),
-        'first_seen_on_page': req.get('page_url', '') or '',
-    }
-
-
 def _strip_url(url: str) -> str:
     """The captured URL minus query, fragment and userinfo.
 
@@ -259,13 +240,14 @@ def aggregate_by_origin(requests: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     "x:8443") can be different services with different authentication. Requests
     whose URL has no origin are skipped.
 
-    Retains a representative evidence sample (request headers, response status,
-    page first seen on) for the request whose authentication classification "wins"
-    so the FE can render its `evidence` block.
-
-    Each entry also carries `urls`: the redacted per-request summaries
-    (_url_summary) of every request folded into it, in capture order, so
+    Each entry carries `urls`: the redacted per-request summaries (_url_summary)
+    of every request folded into it, in capture order, so
     `request_count == len(urls)`. These become the finding's `urls` rows.
+
+    `evidence_index` is the position in `urls` of the request whose
+    authentication classification "wins" (the first one seen at the winning
+    rank). That row is the finding's evidence: the FE presents its status, page,
+    challenge and IdP redirect, so no separate evidence sample is kept here.
     """
     result_map: Dict[Origin, Dict[str, Any]] = {}
     for req in requests:
@@ -277,16 +259,15 @@ def aggregate_by_origin(requests: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         current_auth = summary['authentication']
 
         if origin not in result_map:
-            entry = {
+            result_map[origin] = {
                 'scheme': origin.scheme,
                 'host': origin.host,
                 'port': origin.port,
                 'authentication': current_auth,
                 'request_count': 1,
                 'urls': [summary],
+                'evidence_index': 0,
             }
-            entry.update(_evidence_from(req))
-            result_map[origin] = entry
             continue
 
         entry = result_map[origin]
@@ -295,10 +276,12 @@ def aggregate_by_origin(requests: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
         existing_auth = entry['authentication']
         # Rank by scheme (_auth_rank): the most notable auth seen on any of the
-        # origin's requests wins as its label. A strictly higher rank also brings
-        # its evidence sample along; equal ranks keep the first request seen.
+        # origin's requests wins as its label. A strictly higher rank also makes
+        # this request the evidence; equal ranks keep the first request seen.
+        # The index is taken from `urls`, not the loop, since origin-less
+        # requests are skipped above and never occupy a position.
         if _auth_rank(current_auth) > _auth_rank(existing_auth):
             entry['authentication'] = current_auth
-            entry.update(_evidence_from(req))
+            entry['evidence_index'] = len(entry['urls']) - 1
 
     return list(result_map.values())

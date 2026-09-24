@@ -5,7 +5,7 @@ from fastapi import APIRouter, HTTPException, Request
 from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from .db import AppRow, FindingRow, ScanRow, SubmissionRow
+from .db import AppRow, FindingRow, ScanRow, SubmissionRow, select_findings_with_evidence
 from .models import (
     AppSummary,
     AuthMethod,
@@ -166,10 +166,11 @@ async def list_app_scans(app_id: str, request: Request) -> List[ScanSummary]:
 
 async def _findings_by_origin(session, scan_id: str) -> Dict[Tuple[str, str, int], Finding]:
     # Keyed on the finding's identity, the (scheme, host, port) origin.
-    rows = (
-        await session.execute(select(FindingRow).where(FindingRow.scan_id == scan_id))
-    ).scalars().all()
-    return {(r.scheme, r.host, r.port): finding_to_schema(r) for r in rows}
+    pairs = (await session.execute(select_findings_with_evidence(scan_id))).all()
+    return {
+        (finding.scheme, finding.host, finding.port): finding_to_schema(finding, evidence)
+        for finding, evidence in pairs
+    }
 
 
 @router.get("/apps/{app_id}/diff", response_model=ScanDiff)

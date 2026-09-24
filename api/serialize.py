@@ -1,6 +1,6 @@
 """Helpers that turn ORM rows into the shapes the frontend expects."""
 from datetime import datetime, timezone
-from typing import Iterable, Optional
+from typing import Optional
 
 from .db import AppRow, FindingRow, ScanRow, UrlRow
 from .models import (
@@ -8,7 +8,6 @@ from .models import (
     AuthMethod,
     ExposureState,
     Finding,
-    FindingEvidence,
     ScanDetail,
     ScanStatus,
     ScanSummary,
@@ -25,7 +24,9 @@ def _isoformat(dt: datetime | None) -> str | None:
     return dt.isoformat()
 
 
-def finding_to_schema(row: FindingRow) -> Finding:
+def finding_to_schema(row: FindingRow, evidence: UrlRow | None) -> Finding:
+    """`evidence` is the url row `row.evidence_url_id` points at, or None when it
+    points nowhere. The caller loads it (db.select_findings_with_evidence)."""
     return Finding(
         id=row.id,
         scheme=row.scheme,
@@ -34,17 +35,9 @@ def finding_to_schema(row: FindingRow) -> Finding:
         auth_method=AuthMethod(row.auth_method),
         severity=Severity(row.severity),
         request_count=row.request_count,
-        first_seen_on_page=row.first_seen_on_page,
-        evidence=FindingEvidence(
-            headers_snippet=row.headers_snippet,
-            status_code=row.status_code,
-        ),
+        evidence=url_to_schema(evidence) if evidence is not None else None,
         excluded=row.excluded,
     )
-
-
-def findings_to_schemas(rows: Iterable[FindingRow]) -> list[Finding]:
-    return [finding_to_schema(r) for r in rows]
 
 
 def url_to_schema(row: UrlRow) -> Url:

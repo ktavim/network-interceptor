@@ -11,6 +11,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    select,
     update,
 )
 from sqlalchemy.dialects.postgresql import JSONB
@@ -104,14 +105,37 @@ class FindingRow(Base):
     auth_method: Mapped[str] = mapped_column(String, nullable=False)
     severity: Mapped[str] = mapped_column(String, nullable=False)
     request_count: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
-    first_seen_on_page: Mapped[str] = mapped_column(String, default="", nullable=False)
-    headers_snippet: Mapped[str] = mapped_column(Text, default="", nullable=False)
-    status_code: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    # The url row that is this finding's evidence: the captured request whose
+    # authentication classification won in aggregate_by_origin. The finding's
+    # status, page, challenge and IdP redirect are all read from that row.
+    # Nullable: a finding can point nowhere (rows that predate the pointer).
+    # findings -> urls -> findings is a cycle, so use_alter for table ordering
+    # (as with apps.current_scan_id) and DEFERRABLE INITIALLY DEFERRED so the
+    # findings can be inserted ahead of the urls they point to within one
+    # transaction -- both ids are minted in api.translate before either insert.
+    evidence_url_id: Mapped[Optional[str]] = mapped_column(
+        String,
+        ForeignKey(
+            "urls.id",
+            ondelete="SET NULL",
+            use_alter=True,
+            deferrable=True,
+            initially="DEFERRED",
+            name="fk_findings_evidence_url_id",
+        ),
+        index=True,
+        nullable=True,
+    )
     excluded: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
     scan: Mapped[ScanRow] = relationship("ScanRow", back_populates="findings")
+    # foreign_keys is explicit because evidence_url_id is a second FK path
+    # between the two tables; this relationship is the urls.finding_id one.
     urls: Mapped[list["UrlRow"]] = relationship(
-        "UrlRow", back_populates="finding", cascade="all, delete-orphan"
+        "UrlRow",
+        back_populates="finding",
+        cascade="all, delete-orphan",
+        foreign_keys="UrlRow.finding_id",
     )
 
 
@@ -140,7 +164,9 @@ class UrlRow(Base):
     idp_redirect: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     page_url: Mapped[str] = mapped_column(String, default="", nullable=False)
 
-    finding: Mapped[FindingRow] = relationship("FindingRow", back_populates="urls")
+    finding: Mapped[FindingRow] = relationship(
+        "FindingRow", back_populates="urls", foreign_keys=[finding_id]
+    )
 
 
 class SubmissionRow(Base):
@@ -175,6 +201,21 @@ class ScanEventRow(Base):
     payload: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)
 
     scan: Mapped[ScanRow] = relationship("ScanRow", back_populates="events")
+
+
+def select_findings_with_evidence(scan_id: str):
+    """Select (FindingRow, UrlRow | None) pairs: a scan's findings, each with
+    the url row its evidence_url_id points at.
+
+    An explicit outer join rather than a relationship: every read of a finding
+    wants its evidence row, and a lazy relationship load inside an async
+    session raises MissingGreenlet. Callers add their own ordering.
+    """
+    return (
+        select(FindingRow, UrlRow)
+        .outerjoin(UrlRow, UrlRow.id == FindingRow.evidence_url_id)
+        .where(FindingRow.scan_id == scan_id)
+    )
 
 
 def _database_url() -> str:

@@ -174,5 +174,30 @@ class TestServicesToFindings:
         assert len(finding_rows) == 1
         assert url_rows == []
 
+    def test_evidence_url_id_is_the_url_row_at_evidence_index(self):
+        service = _service("a.com", [
+            {**_URL_ITEM, "url": "https://a.com/1"},
+            {**_URL_ITEM, "url": "https://a.com/2"},
+        ])
+        service["evidence_index"] = 1
+        finding_rows, url_rows = services_to_findings("scan-1", [service])
+        assert finding_rows[0]["evidence_url_id"] == url_rows[1]["id"]
+        assert url_rows[1]["url"] == "https://a.com/2"
+
+    def test_evidence_index_is_relative_to_each_service(self):
+        services = [
+            _service("a.com", [_URL_ITEM]),
+            _service("b.com", [_URL_ITEM, _URL_ITEM]),
+        ]
+        services[0]["evidence_index"] = 0
+        services[1]["evidence_index"] = 1
+        finding_rows, url_rows = services_to_findings("scan-1", services)
+        assert finding_rows[0]["evidence_url_id"] == url_rows[0]["id"]
+        assert finding_rows[1]["evidence_url_id"] == url_rows[2]["id"]
+
+    def test_service_without_evidence_index_points_nowhere(self):
+        finding_rows, _ = services_to_findings("scan-1", [_service("a.com", [_URL_ITEM])])
+        assert finding_rows[0]["evidence_url_id"] is None
+
     def test_empty(self):
         assert services_to_findings("scan-1", []) == ([], [])

@@ -40,26 +40,6 @@ class ExposureState(str, Enum):
     failed = "failed"
 
 
-class FindingEvidence(BaseModel):
-    headers_snippet: str = ""
-    status_code: int = 0
-
-
-class Finding(BaseModel):
-    model_config = ConfigDict(use_enum_values=True)
-
-    id: str
-    scheme: str
-    host: str
-    port: int
-    auth_method: AuthMethod
-    severity: Severity
-    request_count: int
-    first_seen_on_page: str
-    evidence: FindingEvidence
-    excluded: bool
-
-
 class Url(BaseModel):
     """One captured request behind a finding."""
 
@@ -74,6 +54,23 @@ class Url(BaseModel):
     auth_challenge: Optional[str] = None
     idp_redirect: Optional[str] = None
     page_url: str
+
+
+class Finding(BaseModel):
+    model_config = ConfigDict(use_enum_values=True)
+
+    id: str
+    scheme: str
+    host: str
+    port: int
+    auth_method: AuthMethod
+    severity: Severity
+    request_count: int
+    # The captured request whose authentication classification won for this
+    # origin. It is the finding's evidence: status, page, challenge and IdP
+    # redirect. None only for a finding that has no such row.
+    evidence: Optional[Url] = None
+    excluded: bool
 
 
 class ScanSummary(BaseModel):

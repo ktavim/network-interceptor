@@ -244,26 +244,15 @@ class TestAggregateByOrigin:
         # each keeps its own label and evidence: the Basic demanded over http
         # must not become the https service's label.
         reqs = [
-            {
-                "url": "http://a.com/login",
-                "authentication": "basic",
-                "status": 401,
-                "request_headers": {"X-Seen-On": "http"},
-            },
-            {
-                "url": "https://a.com/api",
-                "authentication": "bearer",
-                "status": 200,
-                "request_headers": {"X-Seen-On": "https"},
-            },
+            {"url": "http://a.com/login", "authentication": "basic", "status": 401},
+            {"url": "https://a.com/api", "authentication": "bearer", "status": 200},
         ]
         result = {e["scheme"]: e for e in aggregate_by_origin(reqs)}
         assert set(result) == {"http", "https"}
         assert result["http"]["authentication"] == "basic"
-        assert result["http"]["status_code"] == 401
+        assert result["http"]["urls"][result["http"]["evidence_index"]]["status"] == 401
         assert result["https"]["authentication"] == "bearer"
-        assert result["https"]["status_code"] == 200
-        assert "X-Seen-On: https" in result["https"]["headers_snippet"]
+        assert result["https"]["urls"][result["https"]["evidence_index"]]["status"] == 200
 
     def test_port_separates_findings(self):
         reqs = [
@@ -509,15 +498,45 @@ class TestAggregateByOriginUrls:
         assert len(result) == 1
         assert [u["url"] for u in result[0]["urls"]] == ["http://a.com/1", "http://a.com/2"]
 
-    def test_first_url_at_winning_rank_is_the_evidence_sample(self):
-        # The entry's evidence comes from the first request at the winning rank;
-        # its position in `urls` identifies that row.
+    def test_evidence_index_is_the_first_url_at_the_winning_rank(self):
+        # A later request at the same rank does not displace the first one seen.
         reqs = [
             {"url": "http://a.com/1", "authentication": "unauthenticated", "status": 200},
             {"url": "http://a.com/2", "authentication": "basic", "status": 401},
             {"url": "http://a.com/3", "authentication": "basic", "status": 403},
         ]
         entry = aggregate_by_origin(reqs)[0]
-        winners = [i for i, u in enumerate(entry["urls"]) if u["authentication"] == entry["authentication"]]
-        assert winners[0] == 1
-        assert entry["urls"][1]["status"] == entry["status_code"] == 401
+        assert entry["evidence_index"] == 1
+        assert entry["urls"][1]["url"] == "http://a.com/2"
+        assert entry["urls"][1]["status"] == 401
+
+    def test_evidence_index_starts_at_the_first_request(self):
+        reqs = [
+            {"url": "http://a.com/1", "authentication": "bearer"},
+            {"url": "http://a.com/2", "authentication": "unauthenticated"},
+        ]
+        assert aggregate_by_origin(reqs)[0]["evidence_index"] == 0
+
+    def test_evidence_index_is_per_origin(self):
+        reqs = [
+            {"url": "http://a.com/1", "authentication": "unauthenticated"},
+            {"url": "http://b.com/1", "authentication": "unauthenticated"},
+            {"url": "http://b.com/2", "authentication": "ntlm"},
+            {"url": "http://a.com/2", "authentication": "unauthenticated"},
+            {"url": "http://a.com/3", "authentication": "basic"},
+        ]
+        by_host = {e["host"]: e for e in aggregate_by_origin(reqs)}
+        assert by_host["a.com"]["evidence_index"] == 2
+        assert by_host["b.com"]["evidence_index"] == 1
+
+    def test_evidence_index_counts_only_listed_urls(self):
+        # A request with no origin is skipped and takes no position in `urls`,
+        # so the index is not the request's position in the input.
+        reqs = [
+            {"url": "http://a.com/1", "authentication": "unauthenticated"},
+            {"url": "data:text/plain,hi", "authentication": "unauthenticated"},
+            {"url": "http://a.com/2", "authentication": "basic"},
+        ]
+        entry = aggregate_by_origin(reqs)[0]
+        assert entry["evidence_index"] == 1
+        assert entry["urls"][1]["url"] == "http://a.com/2"

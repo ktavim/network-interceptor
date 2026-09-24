@@ -49,9 +49,8 @@ def service_to_finding_row(scan_id: str, service: Dict[str, Any]) -> Dict[str, A
         "auth_method": auth_method.value,
         "severity": severity.value,
         "request_count": int(service.get("request_count", 1) or 1),
-        "first_seen_on_page": service.get("first_seen_on_page", "") or "",
-        "headers_snippet": service.get("headers_snippet", "") or "",
-        "status_code": int(service.get("status_code", 0) or 0),
+        # Filled in by services_to_findings once the url rows have ids.
+        "evidence_url_id": None,
         "excluded": False,
     }
 
@@ -79,16 +78,23 @@ def url_to_row(finding_id: str, item: Dict[str, Any]) -> Dict[str, Any]:
 def services_to_findings(
     scan_id: str, external_services: List[Dict[str, Any]]
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
-    """(finding rows, url rows). Each url row carries the id of its finding row.
+    """(finding rows, url rows). Each url row carries the id of its finding row,
+    and each finding row's `evidence_url_id` is the id of the url row at the
+    service's `evidence_index` (None when the service names no such row).
 
-    Built in one pass because the url rows need the finding ids minted in
-    service_to_finding_row.
+    Built in one pass because the ids cross both ways: url rows need the
+    finding id minted in service_to_finding_row, and the finding needs the id
+    minted in url_to_row for its evidence row.
     """
     finding_rows: List[Dict[str, Any]] = []
     url_rows: List[Dict[str, Any]] = []
     for service in external_services:
         finding = service_to_finding_row(scan_id, service)
         finding_rows.append(finding)
-        for item in service.get("urls") or []:
-            url_rows.append(url_to_row(finding["id"], item))
+        evidence_index = service.get("evidence_index")
+        for i, item in enumerate(service.get("urls") or []):
+            row = url_to_row(finding["id"], item)
+            if i == evidence_index:
+                finding["evidence_url_id"] = row["id"]
+            url_rows.append(row)
     return finding_rows, url_rows
