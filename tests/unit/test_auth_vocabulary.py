@@ -63,7 +63,10 @@ def _observed_tags() -> set:
     interceptor = NetworkInterceptor()
 
     # A 401 relabels the request with the scheme the server demanded.
-    for challenge in ("Basic realm=x", "Bearer", "NTLM", "Negotiate", "Digest realm=x"):
+    for challenge in (
+        "Basic realm=x", "Bearer", "NTLM", "Negotiate", "Digest realm=x",
+        "Negotiate, NTLM", _negotiate_kerberos(),
+    ):
         request_data = {}
         interceptor._apply_auth_challenge({"www-authenticate": challenge}, request_data, {})
         tags.add(request_data["authentication"])

@@ -11,7 +11,7 @@ def tag_to_auth_method(tag: str) -> AuthMethod:
     Every tag the scraper emits is verbatim an AuthMethod value, so the enum
     constructor is the whole mapping. Sources:
     - auth_analyzer.detect_authentication() — ntlm, kerberos, negotiate, basic, bearer, api_key, other, unauthenticated
-    - auth_analyzer.detect_auth_challenge() — the same short tags for a 401's demanded scheme: basic, bearer, ntlm, negotiate, other (raw challenge kept separately in 'auth_challenge')
+    - auth_analyzer.detect_auth_challenge() — the same short tags for a 401's demanded scheme: basic, bearer, ntlm, kerberos, negotiate, other (raw challenge kept separately in 'auth_challenge')
     - interceptor._apply_idp_redirect() — "oauth" (the IdP host kept separately in 'idp_redirect')
 
     "negotiate" means SPNEGO whose concrete mechanism was unresolvable: NTLM and

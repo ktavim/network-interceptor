@@ -2,7 +2,7 @@
 import base64
 import binascii
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, urlparse, urlsplit, urlunsplit
 
 from ..origin import Origin, origin_of
@@ -134,24 +134,190 @@ def sent_auth_scheme(headers: Dict[str, str]) -> Optional[str]:
     return scheme
 
 
-def detect_auth_challenge(challenge: str) -> str:
-    """Resolve a WWW-Authenticate challenge to the scheme the server demanded.
+# The WWW-Authenticate grammar (RFC 7235 s4.1, now RFC 9110 s11.6.1), as far as
+# splitting a value into its challenges needs:
+#
+#   challenge-list = 1#challenge
+#   challenge      = auth-scheme [ 1*SP ( token68 / #auth-param ) ]
+#   auth-param     = token BWS "=" BWS ( token / quoted-string )
+#   token68        = 1*( ALPHA / DIGIT / "-" / "." / "_" / "~" / "+" / "/" ) *"="
+#
+# The list is comma-separated at the top level, but so are a challenge's own
+# auth-params, so a top-level comma alone does not separate challenges. What
+# follows it does: a "name =" head continues the current challenge's params,
+# a bare token opens a new challenge. A token68 is told from a param by what
+# follows it -- a list boundary, not "=" and a value -- which is also how its
+# trailing "=" padding is kept from reading as a param head.
+_TOKEN_RE = re.compile(r"[!#$%&'*+\-.^_`|~0-9A-Za-z]+")
+_TOKEN68_RE = re.compile(r"[0-9A-Za-z\-._~+/]+=*")
+_AUTH_PARAM_HEAD_RE = re.compile(r"[!#$%&'*+\-.^_`|~0-9A-Za-z]+[ \t]*=[ \t]*")
 
-    Only the leading scheme token is examined; the challenge's parameters (realm,
-    charset, an in-flight SPNEGO token) are left to the caller to retain as
-    evidence. An unnamed scheme (e.g. Digest) is "other" -- a real but unnamed
-    mechanism, not an absence of signal.
+
+def _skip_ows(value: str, i: int) -> int:
+    n = len(value)
+    while i < n and value[i] in ' \t':
+        i += 1
+    return i
+
+
+def _at_list_boundary(value: str, i: int) -> bool:
+    i = _skip_ows(value, i)
+    return i >= len(value) or value[i] == ','
+
+
+def _skip_quoted_string(value: str, i: int) -> int:
+    """Index just past the quoted-string whose opening '"' is at value[i].
+
+    Honours quoted-pair escapes (a backslash-escaped quote does not close the
+    string). An unterminated string runs to the end of the value.
     """
-    lower = (challenge or "").lower()
-    if lower.startswith('basic'):
+    n = len(value)
+    i += 1
+    while i < n:
+        ch = value[i]
+        if ch == '\\' and i + 1 < n:
+            i += 2
+            continue
+        i += 1
+        if ch == '"':
+            break
+    return i
+
+
+def _skip_to_list_comma(value: str, i: int) -> int:
+    """Index of the first top-level comma at or after i, or len(value).
+
+    Commas inside quoted strings are not list separators and are skipped.
+    """
+    n = len(value)
+    while i < n:
+        ch = value[i]
+        if ch == ',':
+            return i
+        if ch == '"':
+            i = _skip_quoted_string(value, i)
+            continue
+        i += 1
+    return n
+
+
+def _skip_auth_params(value: str, i: int) -> int:
+    """Index just past the #auth-param list that starts at value[i].
+
+    Returns i unchanged when no param starts there. Stops at the first
+    top-level comma that is followed by something other than a "name ="
+    head: that comma separates challenges, not params.
+    """
+    n = len(value)
+    while True:
+        head = _AUTH_PARAM_HEAD_RE.match(value, i)
+        if head is None:
+            return i
+        i = head.end()
+        if i < n and value[i] == '"':
+            i = _skip_quoted_string(value, i)
+        else:
+            token = _TOKEN_RE.match(value, i)
+            if token is not None:
+                i = token.end()
+        comma = _skip_ows(value, i)
+        if comma >= n or value[comma] != ',':
+            return i
+        after = comma
+        while after < n and value[after] in ' \t,':
+            after += 1
+        if _AUTH_PARAM_HEAD_RE.match(value, after) is None:
+            return comma
+        i = after
+
+
+def _parse_challenges(value: str) -> List[Tuple[str, Optional[str]]]:
+    """Split a WWW-Authenticate value into its (auth-scheme, token68) pairs.
+
+    token68 is None for a challenge that carries auth-params or nothing. The
+    auth-params themselves are not returned: the label only needs the scheme,
+    and the caller keeps the raw value as evidence. Malformed input never
+    raises; whatever cannot be read is dropped up to the next top-level comma,
+    so one bad element does not hide the schemes around it.
+    """
+    challenges: List[Tuple[str, Optional[str]]] = []
+    n = len(value)
+    i = 0
+    while True:
+        # Skip OWS and empty list elements ("Basic,, Bearer" is legal).
+        while i < n and value[i] in ' \t,':
+            i += 1
+        if i >= n:
+            return challenges
+        scheme_match = _TOKEN_RE.match(value, i)
+        if scheme_match is None:
+            # Not a token where an auth-scheme must be: drop the element.
+            i = _skip_to_list_comma(value, i)
+            continue
+        scheme = scheme_match.group(0)
+        i = scheme_match.end()
+        token68 = None
+        j = _skip_ows(value, i)
+        if j < n and value[j] != ',':
+            t68 = _TOKEN68_RE.match(value, j)
+            if t68 is not None and _at_list_boundary(value, t68.end()):
+                token68 = t68.group(0)
+                i = t68.end()
+            else:
+                i = _skip_auth_params(value, j)
+        challenges.append((scheme, token68))
+        # Anything the element still holds is malformed: drop it.
+        i = _skip_to_list_comma(value, i)
+
+
+def _challenge_tag(scheme: str, token68: Optional[str]) -> str:
+    """Tag one parsed challenge with detect_authentication's vocabulary.
+
+    The scheme is matched as a whole token, so "Basically" is "other", not
+    Basic. A Negotiate challenge carrying a token68 is a handshake in flight
+    (the server's SPNEGO/NTLM continuation on a 401), and that token names the
+    mechanism actually being exchanged: it is resolved the same way as the
+    request side's Negotiate credential, so a mid-handshake 401 cannot relabel
+    an NTLM exchange as mere "negotiate".
+    """
+    lower = scheme.lower()
+    if lower == 'basic':
         return "basic"
-    if lower.startswith('bearer'):
+    if lower == 'bearer':
         return "bearer"
-    if lower.startswith('ntlm'):
+    if lower == 'ntlm':
         return "ntlm"
-    if lower.startswith('negotiate'):
-        return "negotiate"
+    if lower == 'negotiate':
+        return _classify_negotiate_token(token68) if token68 else "negotiate"
+    if lower == 'kerberos':
+        return "kerberos"
     return "other"
+
+
+def detect_auth_challenge(challenge: str) -> str:
+    """Resolve a WWW-Authenticate value to the scheme the server demanded.
+
+    The value may hold several challenges: RFC 7235 lets a server list them
+    comma-separated, and Playwright's response.headers joins repeated
+    WWW-Authenticate headers into one such list, so two headers and one
+    multi-challenge header arrive here in the same shape. Every challenge is
+    parsed (_parse_challenges) and tagged (_challenge_tag), and the tag that
+    ranks highest in _AUTH_RANK wins. A server offering "Negotiate, NTLM"
+    (IIS Windows Authentication's default) or "Bearer, Basic" accepts the
+    weaker scheme, and that acceptance -- not the preference its ordering
+    states -- is the finding; this is the rule aggregate_by_origin already
+    applies across an origin's requests, applied within one response. Ties
+    keep the server's order.
+
+    Only the scheme (and a Negotiate token68) is examined; parameters such as
+    realm are left to the caller to retain as evidence. An unnamed scheme
+    (e.g. Digest) is "other" -- a real but unnamed mechanism, not an absence
+    of signal -- as is a value in which no scheme can be read at all.
+    """
+    tags = [_challenge_tag(scheme, token68) for scheme, token68 in _parse_challenges(challenge or "")]
+    if not tags:
+        return "other"
+    return max(tags, key=_auth_rank)
 
 
 # Host substrings that identify a third-party Identity Provider. Matching is by
@@ -242,8 +408,8 @@ def _url_summary(req: Dict[str, Any]) -> Dict[str, Any]:
 # than one authentication scheme across its requests, the highest-ranked scheme
 # becomes the origin's label. Ordered so the weakest/most-notable schemes (Basic,
 # NTLM) rank highest and "no auth observed" ranks lowest; a 401 challenge ranks as
-# the scheme it demanded, so a demanded Basic/NTLM is never masked by an accepted
-# credential on another endpoint of the same origin.
+# the most notable scheme it demanded, so a demanded Basic/NTLM is never masked by
+# an accepted credential on another endpoint of the same origin.
 _AUTH_RANK = {
     "basic": 8,
     "ntlm": 8,

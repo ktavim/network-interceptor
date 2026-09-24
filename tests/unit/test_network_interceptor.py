@@ -76,6 +76,27 @@ class TestHandleResponse:
         assert result["authentication"] == "other"
         assert result["auth_challenge"] == 'Digest realm="t"'
 
+    async def test_401_multiple_challenges(self, interceptor, mock_response):
+        # IIS Windows Authentication sends Negotiate and NTLM as two headers;
+        # Playwright's response.headers joins repeated headers with ", ", so
+        # they arrive as one list. The label is the most notable scheme offered
+        # and the evidence keeps the whole list.
+        req_data = {"url": "http://a.com", "authentication": "unauthenticated"}
+        result = await interceptor.handle_response(
+            req_data, mock_response(401, {"www-authenticate": "Negotiate, NTLM"})
+        )
+        assert result["authentication"] == "ntlm"
+        assert result["auth_challenge"] == "Negotiate, NTLM"
+
+    async def test_401_ntlm_handshake_continuation_stays_ntlm(self, interceptor, mock_response):
+        # Mid-handshake the request carried an NTLM Type 1 inside Negotiate and
+        # was labeled "ntlm"; the 401 carrying the Type 2 must not relabel it.
+        req_data = {"url": "http://a.com", "authentication": "ntlm"}
+        result = await interceptor.handle_response(
+            req_data, mock_response(401, {"www-authenticate": "Negotiate TlRMTVNTUAACAAAA"})
+        )
+        assert result["authentication"] == "ntlm"
+
     async def test_401_without_header(self, interceptor, mock_response):
         req_data = {"url": "http://a.com", "authentication": "unauthenticated"}
         result = await interceptor.handle_response(req_data, mock_response(401, {}))
