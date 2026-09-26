@@ -69,6 +69,13 @@ class TestServiceToFindingRow:
         assert row["auth_method"] == AuthMethod.basic.value
         assert row["severity"] == Severity.blocker.value
         assert row["request_count"] == 3
+        assert row["ips"] is None
+
+    def test_ips_pass_through(self):
+        row = service_to_finding_row("scan-1", {
+            "scheme": "https", "host": "a.com", "port": 443, "ips": ["10.0.0.1", "10.0.0.2"],
+        })
+        assert row["ips"] == ["10.0.0.1", "10.0.0.2"]
 
     def test_missing_origin_field_is_a_producer_bug(self):
         # scheme/host/port are NOT NULL identity columns: an entry without them

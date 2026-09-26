@@ -67,6 +67,7 @@ class Finding(BaseModel):
     auth_method: AuthMethod
     severity: Severity
     request_count: int
+    ips: Optional[List[str]] = None
     # The captured request whose authentication classification won for this
     # origin. It is the finding's evidence: status, page, challenge and IdP
     # redirect. None only for a finding that has no such row.

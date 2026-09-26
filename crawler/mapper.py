@@ -13,6 +13,7 @@ from .navigation.dom_hasher import DOMHasher
 from .navigation.selectors import INTERACTIVE_SELECTORS, POPUP_CONTAINER_SELECTORS
 from .network import NetworkInterceptor, RequestCapture
 from .network.auth_analyzer import aggregate_by_origin
+from .network.resolver import resolve_hosts
 from .origin import Origin, origin_of
 
 logger = logging.getLogger(__name__)
@@ -114,6 +115,10 @@ class Mapper:
 
         external_services = aggregate_by_origin(self.interceptor.get_requests())
         logger.info("Mapping complete. Found %d external services.", len(external_services))
+
+        ips_by_host = await resolve_hosts(e['host'] for e in external_services)
+        for entry in external_services:
+            entry['ips'] = ips_by_host[entry['host']]
 
         # Emit per-service classification events for the SSE stream.
         for entry in external_services:

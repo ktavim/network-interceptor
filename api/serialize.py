@@ -35,6 +35,7 @@ def finding_to_schema(row: FindingRow, evidence: UrlRow | None) -> Finding:
         auth_method=AuthMethod(row.auth_method),
         severity=Severity(row.severity),
         request_count=row.request_count,
+        ips=row.ips,
         evidence=url_to_schema(evidence) if evidence is not None else None,
         excluded=row.excluded,
     )

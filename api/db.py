@@ -14,7 +14,7 @@ from sqlalchemy import (
     select,
     update,
 )
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -105,6 +105,8 @@ class FindingRow(Base):
     auth_method: Mapped[str] = mapped_column(String, nullable=False)
     severity: Mapped[str] = mapped_column(String, nullable=False)
     request_count: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    # The host's DNS addresses at scan time, the F5 pool members; NULL when the lookup failed.
+    ips: Mapped[Optional[list[str]]] = mapped_column(ARRAY(String), nullable=True)
     # The url row that is this finding's evidence: the captured request whose
     # authentication classification won in aggregate_by_origin. The finding's
     # status, page, challenge and IdP redirect are all read from that row.

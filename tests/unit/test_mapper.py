@@ -8,6 +8,14 @@ from crawler.navigation.dom_hasher import DOMHasher
 from crawler.network import NetworkInterceptor
 
 
+@pytest.fixture(autouse=True)
+def no_dns():
+    # map_website resolves every origin host; unit tests must not hit DNS.
+    with patch("crawler.mapper.resolve_hosts",
+               AsyncMock(side_effect=lambda hosts: {h: [f"ip-of-{h}"] for h in hosts})):
+        yield
+
+
 class TestInit:
     def test_wires_components(self, make_config):
         cfg = make_config()
@@ -47,6 +55,10 @@ class TestMapWebsite:
             ("http", "api.example.com", 80),
             ("https", "api.example.com", 443),
             ("http", "other.com", 8081),
+        }
+        assert {e["host"]: e["ips"] for e in result["external_services"]} == {
+            "api.example.com": ["ip-of-api.example.com"],
+            "other.com": ["ip-of-other.com"],
         }
 
 
