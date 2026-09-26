@@ -375,35 +375,16 @@ def detect_idp_redirect(location: str) -> Optional[str]:
         return None
 
 
-def _strip_url(url: str) -> str:
-    """The captured URL minus query, fragment and userinfo.
+def strip_url(url: str) -> str:
+    """A request URL minus query, fragment and userinfo.
 
-    Nothing secret-bearing survives: query values carry API keys and tokens,
-    userinfo carries credentials, and a fragment is never sent to the server.
+    Applied by the interceptor as it records a request, so nothing
+    secret-bearing survives: query values carry API keys and tokens, userinfo
+    carries credentials, and a fragment is never sent to the server.
     """
     parts = urlsplit(url)
     netloc = parts.netloc.rsplit('@', 1)[-1]
     return urlunsplit((parts.scheme, netloc, parts.path, '', ''))
-
-
-def _url_summary(req: Dict[str, Any]) -> Dict[str, Any]:
-    """The persistable slice of one captured request.
-
-    This is the row the API stores per request under a finding. 
-    `sent_auth_scheme`, is the scheme word alone (see sent_auth_scheme), never 
-    the credentials after it.
-    """
-    return {
-        'method': req.get('method', '') or '',
-        'url': _strip_url(req.get('url', '') or ''),
-        'resource_type': req.get('resource_type', '') or '',
-        'status': int(req.get('status', 0) or 0),
-        'authentication': req.get('authentication', 'unauthenticated'),
-        'sent_auth_scheme': req.get('sent_auth_scheme') or None,
-        'auth_challenge': req.get('auth_challenge') or None,
-        'idp_redirect': req.get('idp_redirect') or None,
-        'page_url': req.get('page_url', '') or '',
-    }
 
 
 # Ranking shared by the two aggregations, which read it in opposite directions.
@@ -467,9 +448,10 @@ def aggregate_by_origin(requests: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     "x:8443") can be different services with different authentication. Requests
     whose URL has no origin are skipped.
 
-    Each entry carries `urls`: the redacted per-request summaries (_url_summary)
-    of every request folded into it, in capture order, so
-    `request_count == len(urls)`. These become the finding's `urls` rows.
+    Each entry carries `urls`: a copy of every request record folded into it,
+    in capture order, so `request_count == len(urls)`. These become the
+    finding's `urls` rows; api.translate.url_to_row picks the columns. The
+    records are already redacted at capture (see NetworkInterceptor).
 
     `evidence_index` is the position in `urls` of the request whose
     authentication classification "wins" (the first one seen at the winning
@@ -482,8 +464,8 @@ def aggregate_by_origin(requests: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         if origin is None:
             continue
 
-        summary = _url_summary(req)
-        current_auth = summary['authentication']
+        record = dict(req)
+        current_auth = req.get('authentication', 'unauthenticated')
 
         if origin not in result_map:
             result_map[origin] = {
@@ -492,14 +474,14 @@ def aggregate_by_origin(requests: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 'port': origin.port,
                 'authentication': current_auth,
                 'request_count': 1,
-                'urls': [summary],
+                'urls': [record],
                 'evidence_index': 0,
             }
             continue
 
         entry = result_map[origin]
         entry['request_count'] = int(entry.get('request_count', 1)) + 1
-        entry['urls'].append(summary)
+        entry['urls'].append(record)
 
         existing_auth = entry['authentication']
         # Rank by scheme (_auth_rank): the most notable auth seen on any of the

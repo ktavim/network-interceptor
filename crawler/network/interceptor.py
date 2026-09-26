@@ -22,7 +22,8 @@ class NetworkInterceptor:
         the caller at the moment the request event fires.
         """
         return {
-            'url': request.url,
+            # Query, fragment and userinfo dropped; detection below sees the full URL.
+            'url': auth_analyzer.strip_url(request.url),
             'method': request.method,
             'resource_type': request.resource_type,
             'page_url': page_url,

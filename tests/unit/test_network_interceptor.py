@@ -27,6 +27,13 @@ class TestHandleRequest:
         assert result["authentication"] == "api_key"
         assert result["sent_auth_scheme"] is None
 
+    async def test_url_is_stripped_but_detection_sees_it_whole(self, interceptor, mock_request):
+        req = mock_request("GET", url="http://user:pw@api.example.com/v1/search?api_key=secret#frag")
+        result = await interceptor.handle_request(req, "http://example.com")
+        assert result["url"] == "http://api.example.com/v1/search"
+        assert result["authentication"] == "api_key"
+        assert "secret" not in repr(result)
+
 
 class TestHandleResponse:
     async def test_200(self, interceptor, mock_response):

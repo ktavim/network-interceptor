@@ -77,7 +77,7 @@ class TestServiceToFindingRow:
             service_to_finding_row("scan-1", {"host": "api.example.com", "authentication": "basic"})
 
 
-# One aggregate_by_origin per-request summary, as _url_summary shapes it.
+# One aggregate_by_origin per-request entry: the interceptor's record as captured.
 _URL_ITEM = {
     "method": "GET",
     "url": "https://api.example.com/v1/items",

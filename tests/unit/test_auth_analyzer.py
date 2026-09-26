@@ -9,8 +9,7 @@ from crawler.network.auth_analyzer import (
     detect_idp_redirect,
     aggregate_by_origin,
     _parse_challenges,
-    _strip_url,
-    _url_summary,
+    strip_url,
 )
 
 
@@ -584,83 +583,23 @@ class TestAggregateByOrigin:
 
 class TestStripUrl:
     def test_drops_query(self):
-        stripped = _strip_url("https://a.com/search?q=secret&api_key=abc123")
+        stripped = strip_url("https://a.com/search?q=secret&api_key=abc123")
         assert stripped == "https://a.com/search"
         assert "secret" not in stripped
         assert "abc123" not in stripped
 
     def test_drops_fragment(self):
-        assert _strip_url("https://a.com/app#/route?x=1") == "https://a.com/app"
+        assert strip_url("https://a.com/app#/route?x=1") == "https://a.com/app"
 
     def test_drops_userinfo(self):
-        assert _strip_url("http://user:p%40ss@a.com/x") == "http://a.com/x"
+        assert strip_url("http://user:p%40ss@a.com/x") == "http://a.com/x"
 
     def test_url_without_query_is_unchanged(self):
-        assert _strip_url("https://a.com/path/to/thing") == "https://a.com/path/to/thing"
+        assert strip_url("https://a.com/path/to/thing") == "https://a.com/path/to/thing"
 
     def test_keeps_explicit_port_and_ipv6_brackets(self):
-        assert _strip_url("https://a.com:8443/x?y=1") == "https://a.com:8443/x"
-        assert _strip_url("http://[::1]:8080/x?y=1") == "http://[::1]:8080/x"
-
-
-# Every key the interceptor can put on a request.
-_FULL_REQUEST = {
-    "url": "https://api.example.com/v1/items?token=secret",
-    "method": "POST",
-    "resource_type": "xhr",
-    "page_url": "https://app.example.com/page",
-    "authentication": "bearer",
-    "sent_auth_scheme": "Bearer",
-    "status": 401,
-    "auth_challenge": 'Basic realm="x"',
-    "idp_redirect": "dev-1.okta.com",
-}
-
-
-class TestUrlSummary:
-    def test_has_exactly_the_persistable_keys(self):
-        # The summary is what gets written to the urls table.
-        summary = _url_summary({**_FULL_REQUEST, "stray": "not persisted"})
-        assert set(summary) == {
-            "method", "url", "resource_type", "status", "authentication",
-            "sent_auth_scheme", "auth_challenge", "idp_redirect", "page_url",
-        }
-        assert "secret" not in repr(summary)
-
-    def test_carries_fields(self):
-        summary = _url_summary(_FULL_REQUEST)
-        assert summary["method"] == "POST"
-        assert summary["url"] == "https://api.example.com/v1/items"
-        assert summary["resource_type"] == "xhr"
-        assert summary["status"] == 401
-        assert summary["authentication"] == "bearer"
-        assert summary["sent_auth_scheme"] == "Bearer"
-        assert summary["auth_challenge"] == 'Basic realm="x"'
-        assert summary["idp_redirect"] == "dev-1.okta.com"
-        assert summary["page_url"] == "https://app.example.com/page"
-
-    def test_defaults(self):
-        summary = _url_summary({"url": "http://a.com/x"})
-        assert summary["method"] == ""
-        assert summary["resource_type"] == ""
-        assert summary["status"] == 0
-        assert summary["authentication"] == "unauthenticated"
-        assert summary["sent_auth_scheme"] is None
-        assert summary["auth_challenge"] is None
-        assert summary["idp_redirect"] is None
-        assert summary["page_url"] == ""
-
-    @pytest.mark.parametrize("status, expected", [(None, 0), ("404", 404), (200, 200)])
-    def test_status_coerced_to_int(self, status, expected):
-        assert _url_summary({"url": "http://a.com/x", "status": status})["status"] == expected
-
-    def test_empty_challenge_idp_and_scheme_become_none(self):
-        summary = _url_summary({
-            "url": "http://a.com/x", "sent_auth_scheme": "", "auth_challenge": "", "idp_redirect": "",
-        })
-        assert summary["sent_auth_scheme"] is None
-        assert summary["auth_challenge"] is None
-        assert summary["idp_redirect"] is None
+        assert strip_url("https://a.com:8443/x?y=1") == "https://a.com:8443/x"
+        assert strip_url("http://[::1]:8080/x?y=1") == "http://[::1]:8080/x"
 
 
 class TestAggregateByOriginUrls:
@@ -685,10 +624,12 @@ class TestAggregateByOriginUrls:
         assert [u["url"] for u in by_host["a.com"]["urls"]] == ["http://a.com/1", "http://a.com/2"]
         assert [u["url"] for u in by_host["b.com"]["urls"]] == ["http://b.com/1"]
 
-    def test_urls_are_stripped(self):
-        reqs = [{"url": "http://a.com/search?q=secret", "authentication": "unauthenticated"}]
-        result = aggregate_by_origin(reqs)
-        assert result[0]["urls"][0]["url"] == "http://a.com/search"
+    def test_urls_are_copies_of_the_records(self):
+        # Redaction happens at capture; nothing is reshaped or dropped here.
+        req = {"url": "http://a.com/1", "authentication": "basic", "status": 401, "page_url": "http://p"}
+        entry = aggregate_by_origin([req])[0]
+        assert entry["urls"][0] == req
+        assert entry["urls"][0] is not req
 
     def test_requests_without_origin_are_not_listed(self):
         reqs = [
