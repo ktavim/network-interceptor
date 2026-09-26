@@ -29,9 +29,19 @@ def tag_to_auth_method(tag: str) -> AuthMethod:
 
 
 def severity_for(auth_method: AuthMethod) -> Severity:
-    if auth_method in (AuthMethod.ntlm, AuthMethod.basic):
+    """Severity of an origin's auth method for the F5 publish.
+
+    Read as a whitelist: only the named, supported schemes clear. A scheme
+    known to be unsupported (NTLM, Basic) blocks, and so does "other", a real
+    scheme the scraper could not name: not on the supported list means
+    unsupported until someone names it in the detector. Review is for what
+    cannot be told yet -- "negotiate" is SPNEGO whose mechanism (Kerberos or
+    NTLM) went unresolved, and "unknown" means a producer drifted from the
+    vocabulary, which the manual auth-method override exists to fill in.
+    """
+    if auth_method in (AuthMethod.ntlm, AuthMethod.basic, AuthMethod.other):
         return Severity.blocker
-    if auth_method in (AuthMethod.negotiate, AuthMethod.unknown, AuthMethod.other):
+    if auth_method in (AuthMethod.negotiate, AuthMethod.unknown):
         return Severity.review
     return Severity.cleared
 

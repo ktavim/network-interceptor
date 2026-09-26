@@ -13,14 +13,18 @@ from api.translate import (
 
 
 class TestSeverityFor:
-    @pytest.mark.parametrize("auth_method", [AuthMethod.ntlm, AuthMethod.basic])
+    @pytest.mark.parametrize(
+        "auth_method", [AuthMethod.ntlm, AuthMethod.basic, AuthMethod.other]
+    )
     def test_blockers(self, auth_method):
+        # The known-unsupported schemes and, since only named schemes are
+        # supported for the publish, any real scheme the scraper could not name.
         assert severity_for(auth_method) == Severity.blocker
 
-    @pytest.mark.parametrize(
-        "auth_method", [AuthMethod.negotiate, AuthMethod.unknown, AuthMethod.other]
-    )
+    @pytest.mark.parametrize("auth_method", [AuthMethod.negotiate, AuthMethod.unknown])
     def test_review(self, auth_method):
+        # What cannot be told yet: SPNEGO with its mechanism unresolved, or a
+        # tag outside the vocabulary that the manual override fills in.
         assert severity_for(auth_method) == Severity.review
 
     @pytest.mark.parametrize(

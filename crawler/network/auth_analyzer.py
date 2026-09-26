@@ -307,10 +307,11 @@ def detect_auth_challenge(challenge: str) -> str:
     favorable one. "Bearer, Basic" is publishable with Bearer, and
     "Negotiate, NTLM" (IIS Windows Authentication's default) is publishable
     through Negotiate; neither is a blocker for also accepting the weaker
-    scheme. This is the opposite direction from aggregate_by_origin, where
-    every URL must work and the least favorable one decides. Ties keep the
-    server's order. The schemes not chosen stay visible in the raw challenge
-    the caller keeps as evidence.
+    scheme. "Negotiate, Digest" resolves to negotiate too: a known path wins
+    over a scheme the tool cannot vouch for. This is the opposite direction
+    from aggregate_by_origin, where every URL must work and the least
+    favorable one decides. Ties keep the server's order. The schemes not
+    chosen stay visible in the raw challenge the caller keeps as evidence.
 
     Only the scheme (and a Negotiate token68) is examined; parameters such as
     realm are left to the caller to retain as evidence. An unnamed scheme
@@ -408,18 +409,23 @@ def _url_summary(req: Dict[str, Any]) -> Dict[str, Any]:
 
 
 # Ranking shared by the two aggregations, which read it in opposite directions.
-# Ordered so the weakest/most-notable schemes (Basic, NTLM) rank highest and "no
-# auth observed" ranks lowest. aggregate_by_origin takes the maximum over an
+# Ordered by distance from a clean publish, in step with the tiers of
+# api.translate.severity_for: the blockers rank highest -- Basic and NTLM, then
+# "other", a scheme the tool cannot name and so one the publish does not
+# support -- the review tier sits below them (negotiate, a known scheme whose
+# mechanism went unresolved, then the "unknown" fallback), and "no auth
+# observed" ranks lowest. aggregate_by_origin takes the maximum over an
 # origin's requests: every URL must be publishable, so an origin is as hard as
-# its hardest URL, and a URL that only takes Basic/NTLM is never masked by an
-# accepted credential elsewhere on the origin. detect_auth_challenge takes the
-# minimum over one response's challenges: the server accepts any one of them,
-# so an endpoint is as easy as its most favorable offer.
+# its hardest URL, and a URL that only takes an unsupported scheme is never
+# masked by an accepted credential elsewhere on the origin.
+# detect_auth_challenge takes the minimum over one response's challenges: the
+# server accepts any one of them, so an endpoint is as easy as its most
+# favorable offer.
 _AUTH_RANK = {
     "basic": 8,
     "ntlm": 8,
-    "negotiate": 7,
-    "other": 6,
+    "other": 7,
+    "negotiate": 6,
     "unknown": 5,
     "kerberos": 4,
     "bearer": 3,
@@ -439,12 +445,18 @@ def _auth_rank(value: str) -> int:
     AuthMethod, so an origin's rank agrees with the scheme the FE will ultimately show.
     A scheme the server demanded therefore counts the same as one actually
     observed. Both an unnamed 401 challenge and an Authorization header carrying an
-    unnamed scheme surface as "other", which ranks just above the "unknown"
-    fallback (reached only by a tag outside the set). Read upward for an origin,
-    "other" sits below negotiate and the blockers, so it never masks a
-    more-notable scheme on another URL, and (like every named scheme) outranks
-    unauthenticated. Read downward within one response (detect_auth_challenge),
-    it beats negotiate but loses to every named publishable scheme.
+    unnamed scheme surface as "other": a blocker like Basic and NTLM, since only
+    the named schemes are supported for the publish, ranked just below those two.
+    Read upward for an origin, that puts the URL with the scheme nobody can name
+    forward as the label and evidence row -- its raw challenge or sent scheme is
+    where the reviewer learns what it is -- instead of letting the common
+    Negotiate case swallow it, while a named blocker on another URL still wins
+    as the more informative label. Read downward within one response
+    (detect_auth_challenge), it loses to negotiate and to every named
+    publishable scheme, so a known path is preferred over one the tool cannot
+    vouch for and an endpoint is not blocked for also offering an unnamed
+    scheme. Below negotiate comes the "unknown" fallback (reached only by a tag
+    outside the set), and every named scheme outranks unauthenticated.
     """
     return _AUTH_RANK.get((value or "").strip().lower(), _AUTH_RANK["unknown"])
 

@@ -263,9 +263,13 @@ class TestDetectAuthChallenge:
         # Within one response any offered scheme suffices, so the lowest rank
         # wins -- the opposite direction from aggregate_by_origin, where every
         # URL must work and the highest rank wins. The table is shared, so an
-        # unnamed scheme loses to bearer here but beats negotiate.
+        # unnamed scheme loses to bearer and to negotiate here -- the known
+        # path is preferred over one the tool cannot vouch for, and offering
+        # Digest alongside is no blocker -- and wins only against Basic or
+        # NTLM, where every offer blocks.
         assert detect_auth_challenge('Bearer realm="a", Digest realm="a"') == "bearer"
-        assert detect_auth_challenge('Digest realm="a", Negotiate') == "other"
+        assert detect_auth_challenge('Digest realm="a", Negotiate') == "negotiate"
+        assert detect_auth_challenge('Basic realm="a", Digest realm="a"') == "other"
 
     def test_rfc7235_example_parses_both_challenges(self):
         # RFC 7235's own multi-challenge example, quoted-pair included.
@@ -523,6 +527,26 @@ class TestAggregateByOrigin:
         ]
         result = aggregate_by_origin(reqs)
         assert result[0]["authentication"] == "ntlm"
+
+    def test_other_outranks_negotiate(self):
+        # A scheme the tool cannot name is unsupported for the publish
+        # (blocker-tier) where a Negotiate handshake is merely unresolved
+        # (review-tier), so the unnamed URL becomes the label and the evidence
+        # row instead of being swallowed by the common Negotiate case. A named
+        # blocker on the origin still wins as the more informative label.
+        reqs = [
+            {"url": "http://a.com/1", "authentication": "negotiate"},
+            {"url": "http://a.com/2", "authentication": "other"},
+            {"url": "http://a.com/3", "authentication": "negotiate"},
+        ]
+        result = aggregate_by_origin(reqs)
+        assert result[0]["authentication"] == "other"
+        assert result[0]["evidence_index"] == 1
+
+        reqs.append({"url": "http://a.com/4", "authentication": "basic"})
+        result = aggregate_by_origin(reqs)
+        assert result[0]["authentication"] == "basic"
+        assert result[0]["evidence_index"] == 3
 
     def test_other_challenge_outranks_unknown(self):
         # An "other" 401 (a named but unrecognized challenge scheme) outranks
