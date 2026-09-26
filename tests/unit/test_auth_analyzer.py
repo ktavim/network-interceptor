@@ -603,18 +603,15 @@ class TestStripUrl:
         assert _strip_url("http://[::1]:8080/x?y=1") == "http://[::1]:8080/x"
 
 
-# Every key the interceptor can put on a request, including the ones that must
-# never be persisted.
+# Every key the interceptor can put on a request.
 _FULL_REQUEST = {
     "url": "https://api.example.com/v1/items?token=secret",
     "method": "POST",
-    "request_headers": {"authorization": "Bearer secret-token"},
     "resource_type": "xhr",
     "page_url": "https://app.example.com/page",
     "authentication": "bearer",
     "sent_auth_scheme": "Bearer",
     "status": 401,
-    "response_headers": {"www-authenticate": 'Basic realm="x"'},
     "auth_challenge": 'Basic realm="x"',
     "idp_redirect": "dev-1.okta.com",
 }
@@ -622,9 +619,8 @@ _FULL_REQUEST = {
 
 class TestUrlSummary:
     def test_has_exactly_the_persistable_keys(self):
-        # The summary is what gets written to the urls table: headers must never
-        # make it in.
-        summary = _url_summary(_FULL_REQUEST)
+        # The summary is what gets written to the urls table.
+        summary = _url_summary({**_FULL_REQUEST, "stray": "not persisted"})
         assert set(summary) == {
             "method", "url", "resource_type", "status", "authentication",
             "sent_auth_scheme", "auth_challenge", "idp_redirect", "page_url",

@@ -24,12 +24,11 @@ class NetworkInterceptor:
         return {
             'url': request.url,
             'method': request.method,
-            'request_headers': request.headers,
             'resource_type': request.resource_type,
             'page_url': page_url,
             'authentication': auth_analyzer.detect_authentication(request.headers, request.url),
             # The scheme word the Authorization header carried, kept as
-            # evidence; the credentials after it never leave this record.
+            # evidence; the credentials after it are never recorded.
             'sent_auth_scheme': auth_analyzer.sent_auth_scheme(request.headers),
         }
 
@@ -52,10 +51,7 @@ class NetworkInterceptor:
             except Exception:
                 headers = {}
 
-            response_data = {
-                'status': status,
-                'response_headers': headers,
-            }
+            response_data = {'status': status}
 
             if status == 401:
                 self._apply_auth_challenge(headers, request_data, response_data)

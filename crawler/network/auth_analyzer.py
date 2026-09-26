@@ -387,13 +387,11 @@ def _strip_url(url: str) -> str:
 
 
 def _url_summary(req: Dict[str, Any]) -> Dict[str, Any]:
-    """The persistable slice of one captured request: no headers.
+    """The persistable slice of one captured request.
 
-    This is the row the API stores per request under a finding, so
-    request/response headers are deliberately left out:
-    the Authorization header carries live credentials. The one value derived
-    from it, `sent_auth_scheme`, is the scheme word alone (see
-    sent_auth_scheme), never the credentials after it.
+    This is the row the API stores per request under a finding. 
+    `sent_auth_scheme`, is the scheme word alone (see sent_auth_scheme), never 
+    the credentials after it.
     """
     return {
         'method': req.get('method', '') or '',
