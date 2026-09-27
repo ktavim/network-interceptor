@@ -58,7 +58,7 @@ def service_to_finding_row(scan_id: str, service: Dict[str, Any]) -> Dict[str, A
         "port": service["port"],
         "auth_method": auth_method.value,
         "severity": severity.value,
-        "request_count": int(service.get("request_count", 1) or 1),
+        "request_count": len(service.get("urls") or []),
         "ips": service.get("ips"),
         # Filled in by services_to_findings once the url rows have ids.
         "evidence_url_id": None,

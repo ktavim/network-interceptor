@@ -415,7 +415,7 @@ class TestAggregateByOrigin:
         ]
         result = aggregate_by_origin(reqs)
         assert _origins(result) == {("http", "a.com", 80), ("http", "b.com", 80)}
-        counts = {e["host"]: e["request_count"] for e in result}
+        counts = {e["host"]: len(e["urls"]) for e in result}
         assert counts == {"a.com": 2, "b.com": 1}
 
     def test_scheme_separates_findings(self):
@@ -449,7 +449,7 @@ class TestAggregateByOrigin:
         result = aggregate_by_origin(reqs)
         assert len(result) == 1
         assert result[0]["port"] == 443
-        assert result[0]["request_count"] == 2
+        assert len(result[0]["urls"]) == 2
         assert result[0]["authentication"] == "bearer"
 
     def test_host_is_bare_hostname(self):
@@ -603,17 +603,6 @@ class TestStripUrl:
 
 
 class TestAggregateByOriginUrls:
-    def test_urls_length_equals_request_count(self):
-        reqs = [
-            {"url": "http://a.com/1", "authentication": "unauthenticated"},
-            {"url": "http://a.com/2", "authentication": "unauthenticated"},
-            {"url": "http://a.com/3", "authentication": "bearer"},
-            {"url": "http://b.com/1", "authentication": "bearer"},
-        ]
-        by_host = {e["host"]: e for e in aggregate_by_origin(reqs)}
-        assert len(by_host["a.com"]["urls"]) == by_host["a.com"]["request_count"] == 3
-        assert len(by_host["b.com"]["urls"]) == by_host["b.com"]["request_count"] == 1
-
     def test_urls_preserve_capture_order(self):
         reqs = [
             {"url": "http://a.com/1", "authentication": "unauthenticated"},

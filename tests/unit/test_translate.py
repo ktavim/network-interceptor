@@ -62,14 +62,19 @@ class TestServiceToFindingRow:
             "host": "api.example.com",
             "port": 8443,
             "authentication": "basic",
-            "request_count": 3,
         })
         assert row["scan_id"] == "scan-1"
         assert (row["scheme"], row["host"], row["port"]) == ("https", "api.example.com", 8443)
         assert row["auth_method"] == AuthMethod.basic.value
         assert row["severity"] == Severity.blocker.value
-        assert row["request_count"] == 3
         assert row["ips"] is None
+
+    def test_request_count_counts_the_urls(self):
+        urls = [{"url": f"https://a.com/{i}"} for i in range(3)]
+        row = service_to_finding_row("scan-1", {
+            "scheme": "https", "host": "a.com", "port": 443, "urls": urls,
+        })
+        assert row["request_count"] == 3
 
     def test_ips_pass_through(self):
         row = service_to_finding_row("scan-1", {
@@ -151,7 +156,6 @@ def _service(host: str, urls: list) -> dict:
         "host": host,
         "port": 443,
         "authentication": "bearer",
-        "request_count": len(urls),
         "urls": urls,
     }
 

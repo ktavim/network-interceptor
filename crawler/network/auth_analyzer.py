@@ -449,9 +449,9 @@ def aggregate_by_origin(requests: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     whose URL has no origin are skipped.
 
     Each entry carries `urls`: a copy of every request record folded into it,
-    in capture order, so `request_count == len(urls)`. These become the
-    finding's `urls` rows; api.translate.url_to_row picks the columns. The
-    records are already redacted at capture (see NetworkInterceptor).
+    in capture order. These become the finding's `urls` rows;
+    api.translate.url_to_row picks the columns. The records are already
+    redacted at capture (see NetworkInterceptor).
 
     `evidence_index` is the position in `urls` of the request whose
     authentication classification "wins" (the first one seen at the winning
@@ -473,14 +473,12 @@ def aggregate_by_origin(requests: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 'host': origin.host,
                 'port': origin.port,
                 'authentication': current_auth,
-                'request_count': 1,
                 'urls': [record],
                 'evidence_index': 0,
             }
             continue
 
         entry = result_map[origin]
-        entry['request_count'] = int(entry.get('request_count', 1)) + 1
         entry['urls'].append(record)
 
         existing_auth = entry['authentication']

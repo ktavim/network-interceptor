@@ -190,7 +190,7 @@ async def test_completed_job_records_findings_and_events(factory, fake_mapper, m
         "pages_crawled": 3,
         "external_services": [{
             "scheme": "https", "host": "a.example", "port": 443,
-            "authentication": "ntlm", "request_count": 1, "ips": ["10.0.0.1"],
+            "authentication": "ntlm", "ips": ["10.0.0.1"],
             "urls": [{"method": "GET", "url": "https://a.example/x", "status": 401,
                       "authentication": "ntlm", "page_url": "http://x"}],
             "evidence_index": 0,
