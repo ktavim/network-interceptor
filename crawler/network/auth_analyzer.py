@@ -417,7 +417,7 @@ _AUTH_RANK = {
 def _auth_rank(value: str) -> int:
     """Rank an authentication tag by its scheme for origin aggregation.
 
-    The scraper's tags are a closed set -- a detect_authentication tag, the scheme
+    The crawler's tags are a closed set -- a detect_authentication tag, the scheme
     tag a 401 challenge resolved to, or an "oauth" IdP redirect -- and they are the
     keys of _AUTH_RANK, so the table is the whole classification and matching is
     exact. Those keys are also the tags translate.tag_to_auth_method maps to

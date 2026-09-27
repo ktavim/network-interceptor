@@ -22,7 +22,7 @@ from crawler.network.auth_analyzer import (
 
 
 # Every tag that can land in a request's 'authentication' field.
-SCRAPER_AUTH_TAGS = {
+CRAWLER_AUTH_TAGS = {
     "ntlm",
     "kerberos",
     "negotiate",
@@ -87,19 +87,19 @@ def _observed_tags() -> set:
 def test_producers_emit_exactly_the_known_vocabulary():
     # Both directions matter: an unknown tag degrades to unknown/review, and a tag
     # nothing emits leaves dead entries in the two classifiers.
-    assert _observed_tags() == SCRAPER_AUTH_TAGS
+    assert _observed_tags() == CRAWLER_AUTH_TAGS
 
 
-@pytest.mark.parametrize("tag", sorted(SCRAPER_AUTH_TAGS))
+@pytest.mark.parametrize("tag", sorted(CRAWLER_AUTH_TAGS))
 def test_tag_maps_to_its_own_auth_method(tag):
     assert tag_to_auth_method(tag) == AuthMethod(tag)
 
 
-@pytest.mark.parametrize("tag", sorted(SCRAPER_AUTH_TAGS))
+@pytest.mark.parametrize("tag", sorted(CRAWLER_AUTH_TAGS))
 def test_tag_has_a_rank(tag):
     assert tag in _AUTH_RANK
 
 
-def test_rank_table_has_no_tags_the_scraper_cannot_emit():
+def test_rank_table_has_no_tags_the_crawler_cannot_emit():
     # "unknown" is _auth_rank's fallback, not a tag any producer emits.
-    assert set(_AUTH_RANK) - {"unknown"} == SCRAPER_AUTH_TAGS
+    assert set(_AUTH_RANK) - {"unknown"} == CRAWLER_AUTH_TAGS

@@ -1,4 +1,4 @@
-"""Translate raw scraper output into the frontend's domain model."""
+"""Translate raw crawler output into the frontend's domain model."""
 import uuid
 from typing import Any, Dict, List, Tuple
 
@@ -6,9 +6,9 @@ from .models import AuthMethod, Severity
 
 
 def tag_to_auth_method(tag: str) -> AuthMethod:
-    """Map the scraper's authentication tag to the FE enum.
+    """Map the crawler's authentication tag to the FE enum.
 
-    Every tag the scraper emits is verbatim an AuthMethod value, so the enum
+    Every tag the crawler emits is verbatim an AuthMethod value, so the enum
     constructor is the whole mapping. Sources:
     - auth_analyzer.detect_authentication() — ntlm, kerberos, negotiate, basic, bearer, api_key, other, unauthenticated
     - auth_analyzer.detect_auth_challenge() — the same short tags for a 401's demanded scheme: basic, bearer, ntlm, kerberos, negotiate, other (raw challenge kept separately in 'auth_challenge')
@@ -33,7 +33,7 @@ def severity_for(auth_method: AuthMethod) -> Severity:
 
     Read as a whitelist: only the named, supported schemes clear. A scheme
     known to be unsupported (NTLM, Basic) blocks, and so does "other", a real
-    scheme the scraper could not name: not on the supported list means
+    scheme the crawler could not name: not on the supported list means
     unsupported until someone names it in the detector. Review is for what
     cannot be told yet -- "negotiate" is SPNEGO whose mechanism (Kerberos or
     NTLM) went unresolved, and "unknown" means a producer drifted from the

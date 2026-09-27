@@ -305,7 +305,7 @@ async def patch_finding(
 
         if body.auth_method is not None:
             # Manual auth correction is allowed only as a fill-in for what the
-            # scraper couldn't classify — never to override an auto-detected
+            # crawler couldn't classify — never to override an auto-detected
             # method, and never back to "unknown". "other" (a real but unnamed
             # challenge) counts as classified, so it stays locked here too.
             if finding.auth_method != AuthMethod.unknown.value:
@@ -320,7 +320,7 @@ async def patch_finding(
                 )
             finding.auth_method = body.auth_method.value
             # Severity is derived from the auth method, so re-derive it using
-            # the same mapping the scraper uses (e.g. ntlm -> blocker).
+            # the same mapping the crawler uses (e.g. ntlm -> blocker).
             finding.severity = severity_for(body.auth_method).value
 
         if body.excluded is not None:

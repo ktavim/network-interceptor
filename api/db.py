@@ -229,7 +229,7 @@ def _database_url() -> str:
     if not url:
         raise RuntimeError(
             "DATABASE_URL is required "
-            "(example: postgresql+asyncpg://user:pass@host:5432/scraper)"
+            "(example: postgresql+asyncpg://user:pass@host:5432/dbname)"
         )
     return url
 

@@ -18,7 +18,7 @@ class TestSeverityFor:
     )
     def test_blockers(self, auth_method):
         # The known-unsupported schemes and, since only named schemes are
-        # supported for the publish, any real scheme the scraper could not name.
+        # supported for the publish, any real scheme the crawler could not name.
         assert severity_for(auth_method) == Severity.blocker
 
     @pytest.mark.parametrize("auth_method", [AuthMethod.negotiate, AuthMethod.unknown])

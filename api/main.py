@@ -40,7 +40,7 @@ def _default_base_config() -> Config:
 
 
 def _load_base_config() -> Config:
-    config_path = os.environ.get("SCRAPER_CONFIG_PATH", "./config.json")
+    config_path = os.environ.get("CRAWLER_CONFIG_PATH", "./config.json")
     if not os.path.exists(config_path):
         logger.info("No config file at %s; using built-in defaults", config_path)
         return _default_base_config()
@@ -67,7 +67,7 @@ async def lifespan(app: FastAPI):
     _check_single_worker()
 
     app.state.base_config = _load_base_config()
-    max_parallel = int(os.environ.get("SCRAPER_MAX_PARALLEL", "2"))
+    max_parallel = int(os.environ.get("CRAWLER_MAX_PARALLEL", "2"))
     app.state.semaphore = asyncio.Semaphore(max_parallel)
 
     engine = make_engine()
