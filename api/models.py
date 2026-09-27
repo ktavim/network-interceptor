@@ -23,7 +23,7 @@ class ExposureState(str, Enum):
 
 
 class Url(BaseModel):
-    """One captured request behind a finding."""
+    """One captured request behind a service."""
 
     model_config = ConfigDict(use_enum_values=True)
 
@@ -39,7 +39,7 @@ class Url(BaseModel):
     page_url: str
 
 
-class Finding(BaseModel):
+class Service(BaseModel):
     model_config = ConfigDict(use_enum_values=True)
 
     id: str
@@ -51,8 +51,8 @@ class Finding(BaseModel):
     request_count: int
     ips: Optional[List[str]] = None
     # The captured request whose authentication classification won for this
-    # origin. It is the finding's evidence: status, page, challenge and IdP
-    # redirect. None only for a finding that has no such row.
+    # origin. It is the service's evidence: status, page, challenge and IdP
+    # redirect. None only for a service that has no such row.
     evidence: Optional[Url] = None
     excluded: bool
 
@@ -69,7 +69,7 @@ class ScanSummary(BaseModel):
     completed_at: Optional[str] = None
     started_by: str
     blocker_count: int
-    finding_count: int
+    service_count: int
     submitted_at: Optional[str] = None
     submitted_by: Optional[str] = None
 
@@ -77,7 +77,6 @@ class ScanSummary(BaseModel):
 class ScanDetail(ScanSummary):
     duration_ms: Optional[int] = None
     pages_crawled: Optional[int] = None
-    external_services: Optional[int] = None
     auth_methods_identified: Optional[int] = None
 
 
@@ -112,8 +111,8 @@ class AuthMethodChange(BaseModel):
 class ScanDiff(BaseModel):
     from_scan_id: str
     to_scan_id: str
-    added: List[Finding]
-    removed: List[Finding]
+    added: List[Service]
+    removed: List[Service]
     exclusion_changes: List[ExclusionChange]
     auth_method_changes: List[AuthMethodChange]
 
@@ -147,7 +146,7 @@ class CreateScanResponse(BaseModel):
     scan_id: str
 
 
-class PatchFindingRequest(BaseModel):
+class PatchServiceRequest(BaseModel):
     # Both fields optional so a PATCH can carry an exclusion toggle, a manual
     # auth-method correction, or both. A body with neither is a no-op.
     excluded: Optional[bool] = None

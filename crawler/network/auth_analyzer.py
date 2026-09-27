@@ -449,13 +449,13 @@ def aggregate_by_origin(requests: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     whose URL has no origin are skipped.
 
     Each entry carries `urls`: a copy of every request record folded into it,
-    in capture order. These become the finding's `urls` rows;
-    api.translate.url_to_row picks the columns. The records are already
+    in capture order. These become the service's `urls` rows;
+    core.translate.url_to_row picks the columns. The records are already
     redacted at capture (see NetworkInterceptor).
 
     `evidence_index` is the position in `urls` of the request whose
     authentication classification "wins" (the first one seen at the winning
-    rank). That row is the finding's evidence: the FE presents its status, page,
+    rank). That row is the service's evidence: the FE presents its status, page,
     challenge and IdP redirect, so no separate evidence sample is kept here.
     """
     result_map: Dict[Origin, Dict[str, Any]] = {}

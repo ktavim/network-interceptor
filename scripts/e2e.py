@@ -174,7 +174,7 @@ class Harness:
             sys.exit(f"alembic upgrade head failed:\n{r.stdout}{r.stderr}")
         conn = await asyncpg.connect(self.pg_dsn)
         try:
-            await conn.execute("TRUNCATE apps, scans, scan_events, findings, urls, submissions CASCADE")
+            await conn.execute("TRUNCATE apps, scans, scan_events, services, urls, submissions CASCADE")
         finally:
             await conn.close()
 
@@ -343,11 +343,11 @@ async def happy_path(h, http, fast_app):
     check("worker events reach the API", {"page_visited", "blocker_found"} <= set(types))
     row = await h.scan(scan_id)
     check("scan completed by a worker", row["status"] == "completed" and row["worker_id"], f"{row['status']} {row['worker_id']}")
-    async with http.get(f"{API}/api/scans/{scan_id}/findings") as r:
-        findings = {(f["host"], f["port"]): (f["auth_method"], f["severity"]) for f in await r.json()}
-    check("findings: Basic on 8803 blocks, 8802 clears",
-          findings.get(("127.0.0.1", 8803)) == ("basic", "blocker")
-          and findings.get(("127.0.0.1", 8802), ("", ""))[1] == "cleared", str(findings))
+    async with http.get(f"{API}/api/scans/{scan_id}/services") as r:
+        services = {(s["host"], s["port"]): (s["auth_method"], s["severity"]) for s in await r.json()}
+    check("services: Basic on 8803 blocks, 8802 clears",
+          services.get(("127.0.0.1", 8803)) == ("basic", "blocker")
+          and services.get(("127.0.0.1", 8802), ("", ""))[1] == "cleared", str(services))
     n_events, n_ended = await asyncio.wait_for(notifications, 15)
     check("/notifications delivers scan_completed",
           n_ended == "terminal" and n_events[-1]["scan_id"] == scan_id and n_events[-1]["type"] == "scan_completed")

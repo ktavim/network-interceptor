@@ -46,8 +46,8 @@ def severity_for(auth_method: AuthMethod) -> Severity:
     return Severity.cleared
 
 
-def service_to_finding_row(scan_id: str, service: Dict[str, Any]) -> Dict[str, Any]:
-    """Convert a single aggregate_by_origin entry into a FindingRow-ready dict."""
+def service_to_row(scan_id: str, service: Dict[str, Any]) -> Dict[str, Any]:
+    """Convert a single aggregate_by_origin entry into a ServiceRow-ready dict."""
     auth_method = tag_to_auth_method(service.get("authentication", ""))
     severity = severity_for(auth_method)
     return {
@@ -60,13 +60,13 @@ def service_to_finding_row(scan_id: str, service: Dict[str, Any]) -> Dict[str, A
         "severity": severity.value,
         "request_count": len(service.get("urls") or []),
         "ips": service.get("ips"),
-        # Filled in by services_to_findings once the url rows have ids.
+        # Filled in by services_to_rows once the url rows have ids.
         "evidence_url_id": None,
         "excluded": False,
     }
 
 
-def url_to_row(finding_id: str, item: Dict[str, Any]) -> Dict[str, Any]:
+def url_to_row(service_id: str, item: Dict[str, Any]) -> Dict[str, Any]:
     """Convert one aggregate_by_origin per-request summary into a UrlRow-ready dict.
 
     `url` is required: a summary without it is a producer bug, like a service
@@ -74,7 +74,7 @@ def url_to_row(finding_id: str, item: Dict[str, Any]) -> Dict[str, Any]:
     """
     return {
         "id": uuid.uuid4().hex,
-        "finding_id": finding_id,
+        "service_id": service_id,
         "method": item.get("method", "") or "",
         "url": item["url"],
         "resource_type": item.get("resource_type", "") or "",
@@ -87,26 +87,26 @@ def url_to_row(finding_id: str, item: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def services_to_findings(
+def services_to_rows(
     scan_id: str, external_services: List[Dict[str, Any]]
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
-    """(finding rows, url rows). Each url row carries the id of its finding row,
-    and each finding row's `evidence_url_id` is the id of the url row at the
+    """(service rows, url rows). Each url row carries the id of its service row,
+    and each service row's `evidence_url_id` is the id of the url row at the
     service's `evidence_index` (None when the service names no such row).
 
     Built in one pass because the ids cross both ways: url rows need the
-    finding id minted in service_to_finding_row, and the finding needs the id
+    service id minted in service_to_row, and the service row needs the id
     minted in url_to_row for its evidence row.
     """
-    finding_rows: List[Dict[str, Any]] = []
+    service_rows: List[Dict[str, Any]] = []
     url_rows: List[Dict[str, Any]] = []
     for service in external_services:
-        finding = service_to_finding_row(scan_id, service)
-        finding_rows.append(finding)
+        service_row = service_to_row(scan_id, service)
+        service_rows.append(service_row)
         evidence_index = service.get("evidence_index")
         for i, item in enumerate(service.get("urls") or []):
-            row = url_to_row(finding["id"], item)
+            row = url_to_row(service_row["id"], item)
             if i == evidence_index:
-                finding["evidence_url_id"] = row["id"]
+                service_row["evidence_url_id"] = row["id"]
             url_rows.append(row)
-    return finding_rows, url_rows
+    return service_rows, url_rows

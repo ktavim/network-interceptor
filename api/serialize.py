@@ -2,16 +2,16 @@
 from datetime import datetime, timezone
 from typing import Optional
 
-from core.db import AppRow, FindingRow, ScanRow, UrlRow
+from core.db import AppRow, ScanRow, ServiceRow, UrlRow
 from core.enums import AuthMethod, Severity
 
 from .models import (
     AppSummary,
     ExposureState,
-    Finding,
     ScanDetail,
     ScanStatus,
     ScanSummary,
+    Service,
     Url,
 )
 
@@ -24,10 +24,10 @@ def _isoformat(dt: datetime | None) -> str | None:
     return dt.isoformat()
 
 
-def finding_to_schema(row: FindingRow, evidence: UrlRow | None) -> Finding:
+def service_to_schema(row: ServiceRow, evidence: UrlRow | None) -> Service:
     """`evidence` is the url row `row.evidence_url_id` points at, or None when it
-    points nowhere. The caller loads it (db.select_findings_with_evidence)."""
-    return Finding(
+    points nowhere. The caller loads it (db.select_services_with_evidence)."""
+    return Service(
         id=row.id,
         scheme=row.scheme,
         host=row.host,
@@ -60,7 +60,7 @@ def scan_to_summary(
     scan: ScanRow,
     *,
     blocker_count: int,
-    finding_count: int,
+    service_count: int,
     submitted_at: datetime | None = None,
     submitted_by: str | None = None,
 ) -> ScanSummary:
@@ -74,7 +74,7 @@ def scan_to_summary(
         completed_at=_isoformat(scan.completed_at),
         started_by=scan.started_by,
         blocker_count=blocker_count,
-        finding_count=finding_count,
+        service_count=service_count,
         submitted_at=_isoformat(submitted_at),
         submitted_by=submitted_by,
     )
@@ -134,8 +134,7 @@ def scan_to_detail(
     scan: ScanRow,
     *,
     blocker_count: int,
-    finding_count: int,
-    external_services: int,
+    service_count: int,
     auth_methods: int,
     submitted_at: datetime | None = None,
     submitted_by: str | None = None,
@@ -153,10 +152,9 @@ def scan_to_detail(
         completed_at=_isoformat(scan.completed_at),
         started_by=scan.started_by,
         blocker_count=blocker_count,
-        finding_count=finding_count,
+        service_count=service_count,
         duration_ms=duration_ms,
         pages_crawled=scan.pages_crawled,
-        external_services=external_services,
         auth_methods_identified=auth_methods,
         submitted_at=_isoformat(submitted_at),
         submitted_by=submitted_by,

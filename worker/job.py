@@ -9,10 +9,10 @@ from typing import Any, Dict, Optional
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from config_loader import Config
-from core.db import FindingRow, UrlRow
+from core.db import ServiceRow, UrlRow
 from core.enums import Severity
 from core.events import emit_event, emit_event_now
-from core.translate import services_to_findings
+from core.translate import services_to_rows
 from crawler import Mapper
 
 from .queue import ClaimedScan, finish
@@ -77,15 +77,15 @@ async def _record_completed(
     started_ms: int,
 ) -> None:
     pages_crawled = int(result.get("pages_crawled", 0) or 0)
-    finding_rows, url_rows = services_to_findings(scan_id, result.get("external_services", []))
-    blockers = [r for r in finding_rows if r["severity"] == Severity.blocker.value]
+    service_rows, url_rows = services_to_rows(scan_id, result.get("external_services", []))
+    blockers = [r for r in service_rows if r["severity"] == Severity.blocker.value]
     async with session_factory() as session:
-        # The scan row first, for lock order; a reaped scan gets no findings.
+        # The scan row first, for lock order; a reaped scan gets no services.
         if not await finish(session, scan_id, "completed", pages_crawled=pages_crawled):
             logger.warning("Scan %s ended while finishing; dropping its results", scan_id)
             return
-        # Findings before urls; findings.evidence_url_id is deferred, so it may point ahead.
-        session.add_all([FindingRow(**r) for r in finding_rows])
+        # Services before urls; services.evidence_url_id is deferred, so it may point ahead.
+        session.add_all([ServiceRow(**r) for r in service_rows])
         session.add_all([UrlRow(**r) for r in url_rows])
         for r in blockers:
             await emit_event(session, scan_id, "blocker_found", {
@@ -96,7 +96,7 @@ async def _record_completed(
             })
         await emit_event(session, scan_id, "scan_completed", {
             "duration_ms": int(time.time() * 1000) - started_ms,
-            "findings": len(finding_rows),
+            "services": len(service_rows),
             "blockers": len(blockers),
         })
         await session.commit()

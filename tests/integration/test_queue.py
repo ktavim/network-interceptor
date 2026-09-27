@@ -9,7 +9,7 @@ from dotenv import dotenv_values
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from core.db import AppRow, Base, FindingRow, ScanEventRow, ScanRow
+from core.db import AppRow, Base, ScanEventRow, ScanRow, ServiceRow
 from core.events import emit_event_now
 from worker.job import LEASE_LOST, SHUTDOWN, USER, Job, run_scan_job
 from worker.queue import ClaimedScan, claim_next, finish, heartbeat, reap_stale
@@ -34,7 +34,7 @@ async def factory():
     engine = create_async_engine(TEST_DATABASE_URL)
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-        await conn.execute(text("TRUNCATE apps, scans, scan_events, findings, urls, submissions CASCADE"))
+        await conn.execute(text("TRUNCATE apps, scans, scan_events, services, urls, submissions CASCADE"))
     yield async_sessionmaker(engine, expire_on_commit=False)
     await engine.dispose()
 
@@ -184,7 +184,7 @@ async def test_cancelled_job_records_its_reason(factory, fake_mapper, make_confi
     assert await _events(factory, scan_id) == events
 
 
-async def test_completed_job_records_findings_and_events(factory, fake_mapper, make_config):
+async def test_completed_job_records_services_and_events(factory, fake_mapper, make_config):
     scan_id = await _add_scan(factory, status="running")
     fake_mapper.result = {
         "pages_crawled": 3,
@@ -203,9 +203,9 @@ async def test_completed_job_records_findings_and_events(factory, fake_mapper, m
     scan = await _scan(factory, scan_id)
     assert (scan.status, scan.pages_crawled) == ("completed", 3)
     async with factory() as session:
-        findings = (await session.execute(select(FindingRow).where(FindingRow.scan_id == scan_id))).scalars().all()
-    assert [(f.host, f.severity) for f in findings] == [("a.example", "blocker")]
-    assert findings[0].evidence_url_id is not None
+        services = (await session.execute(select(ServiceRow).where(ServiceRow.scan_id == scan_id))).scalars().all()
+    assert [(s.host, s.severity) for s in services] == [("a.example", "blocker")]
+    assert services[0].evidence_url_id is not None
     types = [t for _, t, _ in await _events(factory, scan_id)]
     assert types == ["blocker_found", "scan_completed"]
 

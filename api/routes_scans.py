@@ -10,11 +10,11 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from core.db import (
     AppRow,
-    FindingRow,
     ScanRow,
+    ServiceRow,
     SubmissionRow,
     UrlRow,
-    select_findings_with_evidence,
+    select_services_with_evidence,
 )
 from core.enums import AuthMethod, Severity
 from core.events import emit_event
@@ -23,15 +23,15 @@ from core.translate import severity_for
 from .models import (
     CreateScanRequest,
     CreateScanResponse,
-    Finding,
-    PatchFindingRequest,
+    PatchServiceRequest,
     ScanDetail,
     ScanSummary,
+    Service,
     SubmitScanResponse,
     Url,
 )
 from .routes_me import _STUB_USER
-from .serialize import finding_to_schema, scan_to_detail, scan_to_summary, url_to_schema
+from .serialize import scan_to_detail, scan_to_summary, service_to_schema, url_to_schema
 
 logger = logging.getLogger(__name__)
 
@@ -45,14 +45,14 @@ def _session_factory(request: Request) -> async_sessionmaker[AsyncSession]:
 def _summary_aggregates_subq():
     return (
         select(
-            FindingRow.scan_id.label("scan_id"),
-            func.count(FindingRow.id).label("finding_count"),
+            ServiceRow.scan_id.label("scan_id"),
+            func.count(ServiceRow.id).label("service_count"),
             func.coalesce(
                 func.sum(
                     case(
                         (
-                            (FindingRow.severity == Severity.blocker.value)
-                            & (FindingRow.excluded.is_(False)),
+                            (ServiceRow.severity == Severity.blocker.value)
+                            & (ServiceRow.excluded.is_(False)),
                             1,
                         ),
                         else_=0,
@@ -60,9 +60,9 @@ def _summary_aggregates_subq():
                 ),
                 0,
             ).label("blocker_count"),
-            func.count(func.distinct(FindingRow.auth_method)).label("auth_count"),
+            func.count(func.distinct(ServiceRow.auth_method)).label("auth_count"),
         )
-        .group_by(FindingRow.scan_id)
+        .group_by(ServiceRow.scan_id)
         .subquery()
     )
 
@@ -74,9 +74,9 @@ def _summary_aggregates_subq():
 async def _latest_completed_scan_id(session, app_id: str) -> str | None:
     """The newest-by-started_at completed scan for an app, or None.
 
-    Used by both submit (for eligibility) and patch_finding (for the editability
+    Used by both submit (for eligibility) and patch_service (for the editability
     freeze). Failed/cancelled/running/queued scans don't count — they have no
-    actionable findings and shouldn't shadow an earlier valid completed scan.
+    services to act on and shouldn't shadow an earlier valid completed scan.
     """
     return (
         await session.execute(
@@ -97,7 +97,7 @@ async def list_scans(request: Request) -> List[ScanSummary]:
             select(
                 ScanRow,
                 func.coalesce(agg.c.blocker_count, 0).label("blocker_count"),
-                func.coalesce(agg.c.finding_count, 0).label("finding_count"),
+                func.coalesce(agg.c.service_count, 0).label("service_count"),
                 SubmissionRow.submitted_at,
                 SubmissionRow.submitted_by,
             )
@@ -107,12 +107,12 @@ async def list_scans(request: Request) -> List[ScanSummary]:
         )
         result = await session.execute(stmt)
         out: list[ScanSummary] = []
-        for scan, blocker_count, finding_count, submitted_at, submitted_by in result.all():
+        for scan, blocker_count, service_count, submitted_at, submitted_by in result.all():
             out.append(
                 scan_to_summary(
                     scan,
                     blocker_count=int(blocker_count or 0),
-                    finding_count=int(finding_count or 0),
+                    service_count=int(service_count or 0),
                     submitted_at=submitted_at,
                     submitted_by=submitted_by,
                 )
@@ -129,7 +129,7 @@ async def get_scan(scan_id: str, request: Request) -> ScanDetail:
             select(
                 ScanRow,
                 func.coalesce(agg.c.blocker_count, 0),
-                func.coalesce(agg.c.finding_count, 0),
+                func.coalesce(agg.c.service_count, 0),
                 func.coalesce(agg.c.auth_count, 0),
                 SubmissionRow.submitted_at,
                 SubmissionRow.submitted_by,
@@ -144,7 +144,7 @@ async def get_scan(scan_id: str, request: Request) -> ScanDetail:
         (
             scan,
             blocker_count,
-            finding_count,
+            service_count,
             auth_count,
             submitted_at,
             submitted_by,
@@ -152,20 +152,15 @@ async def get_scan(scan_id: str, request: Request) -> ScanDetail:
         return scan_to_detail(
             scan,
             blocker_count=int(blocker_count or 0),
-            finding_count=int(finding_count or 0),
-            # An external service is one origin, and a scan holds exactly one
-            # finding per origin (uq_findings_scan_origin), so the two counts
-            # coincide. Kept as its own field: it is the stat the FE shows, not a
-            # row count, and it includes excluded findings.
-            external_services=int(finding_count or 0),
+            service_count=int(service_count or 0),
             auth_methods=int(auth_count or 0),
             submitted_at=submitted_at,
             submitted_by=submitted_by,
         )
 
 
-@router.get("/scans/{scan_id}/findings", response_model=List[Finding])
-async def list_findings(scan_id: str, request: Request) -> List[Finding]:
+@router.get("/scans/{scan_id}/services", response_model=List[Service])
+async def list_services(scan_id: str, request: Request) -> List[Service]:
     factory = _session_factory(request)
     async with factory() as session:
         scan = await session.get(ScanRow, scan_id)
@@ -173,27 +168,27 @@ async def list_findings(scan_id: str, request: Request) -> List[Finding]:
             raise HTTPException(status_code=404, detail={"message": "scan not found"})
         pairs = (
             await session.execute(
-                select_findings_with_evidence(scan_id)
-                .order_by(FindingRow.host, FindingRow.port, FindingRow.scheme)
+                select_services_with_evidence(scan_id)
+                .order_by(ServiceRow.host, ServiceRow.port, ServiceRow.scheme)
             )
         ).all()
-        return [finding_to_schema(finding, evidence) for finding, evidence in pairs]
+        return [service_to_schema(service, evidence) for service, evidence in pairs]
 
 
-@router.get("/scans/{scan_id}/findings/{finding_id}/urls", response_model=List[Url])
-async def list_finding_urls(scan_id: str, finding_id: str, request: Request) -> List[Url]:
+@router.get("/scans/{scan_id}/services/{service_id}/urls", response_model=List[Url])
+async def list_service_urls(scan_id: str, service_id: str, request: Request) -> List[Url]:
     factory = _session_factory(request)
     async with factory() as session:
-        finding = await session.get(FindingRow, finding_id)
-        if not finding or finding.scan_id != scan_id:
-            raise HTTPException(status_code=404, detail={"message": "finding not found"})
-        # Query the table directly rather than touching finding.urls: a lazy
+        service = await session.get(ServiceRow, service_id)
+        if not service or service.scan_id != scan_id:
+            raise HTTPException(status_code=404, detail={"message": "service not found"})
+        # Query the table directly rather than touching service.urls: a lazy
         # relationship load inside an async session raises MissingGreenlet.
         # Ids are random, so sort by (url, method) for a stable listing.
         rows = (
             await session.execute(
                 select(UrlRow)
-                .where(UrlRow.finding_id == finding_id)
+                .where(UrlRow.service_id == service_id)
                 .order_by(UrlRow.url, UrlRow.method)
             )
         ).scalars().all()
@@ -243,18 +238,18 @@ async def create_scan(body: CreateScanRequest, request: Request) -> CreateScanRe
     return CreateScanResponse(scan_id=scan_id)
 
 
-@router.patch("/scans/{scan_id}/findings/{finding_id}", response_model=Finding)
-async def patch_finding(
+@router.patch("/scans/{scan_id}/services/{service_id}", response_model=Service)
+async def patch_service(
     scan_id: str,
-    finding_id: str,
-    body: PatchFindingRequest,
+    service_id: str,
+    body: PatchServiceRequest,
     request: Request,
-) -> Finding:
+) -> Service:
     factory = _session_factory(request)
     async with factory() as session:
-        finding = await session.get(FindingRow, finding_id)
-        if not finding or finding.scan_id != scan_id:
-            raise HTTPException(status_code=404, detail={"message": "finding not found"})
+        service = await session.get(ServiceRow, service_id)
+        if not service or service.scan_id != scan_id:
+            raise HTTPException(status_code=404, detail={"message": "service not found"})
         scan = await session.get(ScanRow, scan_id)
         # Editable iff this is the latest completed scan AND has never been
         # submitted. Two distinct error messages so the UI can tell the user
@@ -283,7 +278,7 @@ async def patch_finding(
             # crawler couldn't classify — never to override an auto-detected
             # method, and never back to "unknown". "other" (a real but unnamed
             # challenge) counts as classified, so it stays locked here too.
-            if finding.auth_method != AuthMethod.unknown.value:
+            if service.auth_method != AuthMethod.unknown.value:
                 raise HTTPException(
                     status_code=409,
                     detail={"message": "auth method can only be set manually while it is unknown"},
@@ -293,22 +288,22 @@ async def patch_finding(
                     status_code=422,
                     detail={"message": "cannot set auth method to unknown"},
                 )
-            finding.auth_method = body.auth_method.value
+            service.auth_method = body.auth_method.value
             # Severity is derived from the auth method, so re-derive it using
             # the same mapping the crawler uses (e.g. ntlm -> blocker).
-            finding.severity = severity_for(body.auth_method).value
+            service.severity = severity_for(body.auth_method).value
 
         if body.excluded is not None:
-            finding.excluded = body.excluded
+            service.excluded = body.excluded
 
         await session.commit()
-        await session.refresh(finding)
+        await session.refresh(service)
         evidence = (
-            await session.get(UrlRow, finding.evidence_url_id)
-            if finding.evidence_url_id
+            await session.get(UrlRow, service.evidence_url_id)
+            if service.evidence_url_id
             else None
         )
-        return finding_to_schema(finding, evidence)
+        return service_to_schema(service, evidence)
 
 
 @router.post("/scans/{scan_id}/submit", response_model=SubmitScanResponse)
@@ -353,11 +348,11 @@ async def submit_scan(scan_id: str, request: Request) -> SubmitScanResponse:
         unresolved_blockers = (
             await session.execute(
                 select(func.count())
-                .select_from(FindingRow)
+                .select_from(ServiceRow)
                 .where(
-                    FindingRow.scan_id == scan_id,
-                    FindingRow.severity == Severity.blocker.value,
-                    FindingRow.excluded.is_(False),
+                    ServiceRow.scan_id == scan_id,
+                    ServiceRow.severity == Severity.blocker.value,
+                    ServiceRow.excluded.is_(False),
                 )
             )
         ).scalar_one()

@@ -1,11 +1,11 @@
 """Tests for core.translate."""
 import pytest
 
-from core.db import FindingRow, UrlRow
+from core.db import ServiceRow, UrlRow
 from core.enums import AuthMethod, Severity
 from core.translate import (
-    service_to_finding_row,
-    services_to_findings,
+    service_to_row,
+    services_to_rows,
     severity_for,
     tag_to_auth_method,
     url_to_row,
@@ -55,9 +55,9 @@ class TestTagToAuthMethod:
         assert tag_to_auth_method("something weird") == AuthMethod.unknown
 
 
-class TestServiceToFindingRow:
+class TestServiceToRow:
     def test_carries_the_origin_triple(self):
-        row = service_to_finding_row("scan-1", {
+        row = service_to_row("scan-1", {
             "scheme": "https",
             "host": "api.example.com",
             "port": 8443,
@@ -71,13 +71,13 @@ class TestServiceToFindingRow:
 
     def test_request_count_counts_the_urls(self):
         urls = [{"url": f"https://a.com/{i}"} for i in range(3)]
-        row = service_to_finding_row("scan-1", {
+        row = service_to_row("scan-1", {
             "scheme": "https", "host": "a.com", "port": 443, "urls": urls,
         })
         assert row["request_count"] == 3
 
     def test_ips_pass_through(self):
-        row = service_to_finding_row("scan-1", {
+        row = service_to_row("scan-1", {
             "scheme": "https", "host": "a.com", "port": 443, "ips": ["10.0.0.1", "10.0.0.2"],
         })
         assert row["ips"] == ["10.0.0.1", "10.0.0.2"]
@@ -86,7 +86,7 @@ class TestServiceToFindingRow:
         # scheme/host/port are NOT NULL identity columns: an entry without them
         # must fail loudly here rather than persist a blank origin.
         with pytest.raises(KeyError):
-            service_to_finding_row("scan-1", {"host": "api.example.com", "authentication": "basic"})
+            service_to_row("scan-1", {"host": "api.example.com", "authentication": "basic"})
 
 
 # One aggregate_by_origin per-request entry: the interceptor's record as captured.
@@ -104,9 +104,9 @@ _URL_ITEM = {
 
 
 class TestUrlToRow:
-    def test_links_finding(self):
-        row = url_to_row("finding-1", _URL_ITEM)
-        assert row["finding_id"] == "finding-1"
+    def test_links_service(self):
+        row = url_to_row("service-1", _URL_ITEM)
+        assert row["service_id"] == "service-1"
         assert row["method"] == "GET"
         assert row["url"] == "https://api.example.com/v1/items"
         assert row["resource_type"] == "xhr"
@@ -125,11 +125,11 @@ class TestUrlToRow:
         ("something weird", AuthMethod.unknown),
     ])
     def test_auth_method_normalized(self, tag, expected):
-        row = url_to_row("finding-1", {**_URL_ITEM, "authentication": tag})
+        row = url_to_row("service-1", {**_URL_ITEM, "authentication": tag})
         assert row["auth_method"] == expected.value
 
     def test_defaults(self):
-        row = url_to_row("finding-1", {"url": "https://a.com/x"})
+        row = url_to_row("service-1", {"url": "https://a.com/x"})
         assert row["method"] == ""
         assert row["resource_type"] == ""
         assert row["status_code"] == 0
@@ -141,12 +141,12 @@ class TestUrlToRow:
 
     def test_missing_url_is_a_producer_bug(self):
         with pytest.raises(KeyError):
-            url_to_row("finding-1", {"method": "GET"})
+            url_to_row("service-1", {"method": "GET"})
 
     def test_row_keys_match_the_table(self):
-        # api.service does UrlRow(**row): an unknown key would TypeError, and a
+        # worker.job does UrlRow(**row): an unknown key would TypeError, and a
         # missing one would silently fall back to the column default.
-        row = url_to_row("finding-1", _URL_ITEM)
+        row = url_to_row("service-1", _URL_ITEM)
         assert set(row) == set(UrlRow.__table__.columns.keys())
 
 
@@ -160,8 +160,8 @@ def _service(host: str, urls: list) -> dict:
     }
 
 
-class TestServicesToFindings:
-    def test_returns_findings_and_urls_linked_by_finding_id(self):
+class TestServicesToRows:
+    def test_returns_services_and_urls_linked_by_service_id(self):
         services = [
             _service("a.com", [
                 {**_URL_ITEM, "url": "https://a.com/1"},
@@ -169,27 +169,27 @@ class TestServicesToFindings:
             ]),
             _service("b.com", [{**_URL_ITEM, "url": "https://b.com/1"}]),
         ]
-        finding_rows, url_rows = services_to_findings("scan-1", services)
-        assert len(finding_rows) == 2
+        service_rows, url_rows = services_to_rows("scan-1", services)
+        assert len(service_rows) == 2
         assert len(url_rows) == 3
-        by_host = {f["host"]: f["id"] for f in finding_rows}
-        assert [(u["finding_id"], u["url"]) for u in url_rows] == [
+        by_host = {s["host"]: s["id"] for s in service_rows}
+        assert [(u["service_id"], u["url"]) for u in url_rows] == [
             (by_host["a.com"], "https://a.com/1"),
             (by_host["a.com"], "https://a.com/2"),
             (by_host["b.com"], "https://b.com/1"),
         ]
 
-    def test_finding_row_has_no_urls_key(self):
-        # api.service does FindingRow(**row); an extra key would raise TypeError.
-        finding_rows, _ = services_to_findings("scan-1", [_service("a.com", [_URL_ITEM])])
-        assert "urls" not in finding_rows[0]
-        assert set(finding_rows[0]) == set(FindingRow.__table__.columns.keys())
+    def test_service_row_has_no_urls_key(self):
+        # worker.job does ServiceRow(**row); an extra key would raise TypeError.
+        service_rows, _ = services_to_rows("scan-1", [_service("a.com", [_URL_ITEM])])
+        assert "urls" not in service_rows[0]
+        assert set(service_rows[0]) == set(ServiceRow.__table__.columns.keys())
 
     def test_service_without_urls_yields_no_url_rows(self):
         service = _service("a.com", [])
         del service["urls"]
-        finding_rows, url_rows = services_to_findings("scan-1", [service])
-        assert len(finding_rows) == 1
+        service_rows, url_rows = services_to_rows("scan-1", [service])
+        assert len(service_rows) == 1
         assert url_rows == []
 
     def test_evidence_url_id_is_the_url_row_at_evidence_index(self):
@@ -198,8 +198,8 @@ class TestServicesToFindings:
             {**_URL_ITEM, "url": "https://a.com/2"},
         ])
         service["evidence_index"] = 1
-        finding_rows, url_rows = services_to_findings("scan-1", [service])
-        assert finding_rows[0]["evidence_url_id"] == url_rows[1]["id"]
+        service_rows, url_rows = services_to_rows("scan-1", [service])
+        assert service_rows[0]["evidence_url_id"] == url_rows[1]["id"]
         assert url_rows[1]["url"] == "https://a.com/2"
 
     def test_evidence_index_is_relative_to_each_service(self):
@@ -209,13 +209,13 @@ class TestServicesToFindings:
         ]
         services[0]["evidence_index"] = 0
         services[1]["evidence_index"] = 1
-        finding_rows, url_rows = services_to_findings("scan-1", services)
-        assert finding_rows[0]["evidence_url_id"] == url_rows[0]["id"]
-        assert finding_rows[1]["evidence_url_id"] == url_rows[2]["id"]
+        service_rows, url_rows = services_to_rows("scan-1", services)
+        assert service_rows[0]["evidence_url_id"] == url_rows[0]["id"]
+        assert service_rows[1]["evidence_url_id"] == url_rows[2]["id"]
 
     def test_service_without_evidence_index_points_nowhere(self):
-        finding_rows, _ = services_to_findings("scan-1", [_service("a.com", [_URL_ITEM])])
-        assert finding_rows[0]["evidence_url_id"] is None
+        service_rows, _ = services_to_rows("scan-1", [_service("a.com", [_URL_ITEM])])
+        assert service_rows[0]["evidence_url_id"] is None
 
     def test_empty(self):
-        assert services_to_findings("scan-1", []) == ([], [])
+        assert services_to_rows("scan-1", []) == ([], [])

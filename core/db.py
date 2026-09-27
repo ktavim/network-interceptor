@@ -82,8 +82,8 @@ class ScanRow(Base):
         DateTime(timezone=True), nullable=True
     )
 
-    findings: Mapped[list["FindingRow"]] = relationship(
-        "FindingRow", back_populates="scan", cascade="all, delete-orphan"
+    services: Mapped[list["ServiceRow"]] = relationship(
+        "ServiceRow", back_populates="scan", cascade="all, delete-orphan"
     )
     submissions: Mapped[list["SubmissionRow"]] = relationship(
         "SubmissionRow", back_populates="scan", cascade="all, delete-orphan"
@@ -93,12 +93,18 @@ class ScanRow(Base):
     )
 
 
-class FindingRow(Base):
-    __tablename__ = "findings"
+class ServiceRow(Base):
+    """One external service a scan saw: an origin the app called, with its
+    authentication classification and review state.
+
+    Per scan, not per app: each scan records its services afresh, so the same
+    service in two scans is two rows, which the scan diff matches by origin.
+    """
+    __tablename__ = "services"
     __table_args__ = (
-        # A finding is one origin -- the (scheme, host, port) listener -- per scan.
+        # A service is one origin -- the (scheme, host, port) listener -- per scan.
         # The scan diff in routes_apps keys on this triple, so it must be unique.
-        UniqueConstraint("scan_id", "scheme", "host", "port", name="uq_findings_scan_origin"),
+        UniqueConstraint("scan_id", "scheme", "host", "port", name="uq_services_scan_origin"),
     )
 
     id: Mapped[str] = mapped_column(String, primary_key=True)
@@ -114,13 +120,13 @@ class FindingRow(Base):
     request_count: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     # The host's DNS addresses at scan time, the F5 pool members; NULL when the lookup failed.
     ips: Mapped[Optional[list[str]]] = mapped_column(ARRAY(String), nullable=True)
-    # The url row that is this finding's evidence: the captured request whose
-    # authentication classification won in aggregate_by_origin. The finding's
+    # The url row that is this service's evidence: the captured request whose
+    # authentication classification won in aggregate_by_origin. The service's
     # status, page, challenge and IdP redirect are all read from that row.
-    # Nullable: a finding can point nowhere (rows that predate the pointer).
-    # findings -> urls -> findings is a cycle, so use_alter for table ordering
+    # Nullable: a service can point nowhere (rows that predate the pointer).
+    # services -> urls -> services is a cycle, so use_alter for table ordering
     # (as with apps.current_scan_id) and DEFERRABLE INITIALLY DEFERRED so the
-    # findings can be inserted ahead of the urls they point to within one
+    # services can be inserted ahead of the urls they point to within one
     # transaction -- both ids are minted in core.translate before either insert.
     evidence_url_id: Mapped[Optional[str]] = mapped_column(
         String,
@@ -130,42 +136,42 @@ class FindingRow(Base):
             use_alter=True,
             deferrable=True,
             initially="DEFERRED",
-            name="fk_findings_evidence_url_id",
+            name="fk_services_evidence_url_id",
         ),
         index=True,
         nullable=True,
     )
     excluded: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
-    scan: Mapped[ScanRow] = relationship("ScanRow", back_populates="findings")
+    scan: Mapped[ScanRow] = relationship("ScanRow", back_populates="services")
     # foreign_keys is explicit because evidence_url_id is a second FK path
-    # between the two tables; this relationship is the urls.finding_id one.
+    # between the two tables; this relationship is the urls.service_id one.
     urls: Mapped[list["UrlRow"]] = relationship(
         "UrlRow",
-        back_populates="finding",
+        back_populates="service",
         cascade="all, delete-orphan",
-        foreign_keys="UrlRow.finding_id",
+        foreign_keys="UrlRow.service_id",
     )
 
 
 class UrlRow(Base):
-    """One captured request behind a finding: per-request evidence, redacted.
+    """One captured request behind a service: per-request evidence, redacted.
 
-    One row per capture, so a URL can repeat within a finding 
+    One row per capture, so a URL can repeat within a service
     (different method/status). No unique constraint and no ordering column.
     """
     __tablename__ = "urls"
 
     id: Mapped[str] = mapped_column(String, primary_key=True)
-    finding_id: Mapped[str] = mapped_column(
-        String, ForeignKey("findings.id", ondelete="CASCADE"), index=True, nullable=False
+    service_id: Mapped[str] = mapped_column(
+        String, ForeignKey("services.id", ondelete="CASCADE"), index=True, nullable=False
     )
     method: Mapped[str] = mapped_column(String, nullable=False)
     # Query string, fragment and userinfo stripped.
     url: Mapped[str] = mapped_column(String, nullable=False)
     resource_type: Mapped[str] = mapped_column(String, default="", nullable=False)
     status_code: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
-    # Always an AuthMethod value (tag_to_auth_method), like findings.auth_method.
+    # Always an AuthMethod value (tag_to_auth_method), like services.auth_method.
     auth_method: Mapped[str] = mapped_column(String, nullable=False)
     # The auth-scheme word of the Authorization header the client sent
     # ("Basic", "Digest", "Negotiate"), case as sent; NULL when none was. Only
@@ -177,8 +183,8 @@ class UrlRow(Base):
     idp_redirect: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     page_url: Mapped[str] = mapped_column(String, default="", nullable=False)
 
-    finding: Mapped[FindingRow] = relationship(
-        "FindingRow", back_populates="urls", foreign_keys=[finding_id]
+    service: Mapped[ServiceRow] = relationship(
+        "ServiceRow", back_populates="urls", foreign_keys=[service_id]
     )
 
 
@@ -216,18 +222,18 @@ class ScanEventRow(Base):
     scan: Mapped[ScanRow] = relationship("ScanRow", back_populates="events")
 
 
-def select_findings_with_evidence(scan_id: str):
-    """Select (FindingRow, UrlRow | None) pairs: a scan's findings, each with
+def select_services_with_evidence(scan_id: str):
+    """Select (ServiceRow, UrlRow | None) pairs: a scan's services, each with
     the url row its evidence_url_id points at.
 
-    An explicit outer join rather than a relationship: every read of a finding
+    An explicit outer join rather than a relationship: every read of a service
     wants its evidence row, and a lazy relationship load inside an async
     session raises MissingGreenlet. Callers add their own ordering.
     """
     return (
-        select(FindingRow, UrlRow)
-        .outerjoin(UrlRow, UrlRow.id == FindingRow.evidence_url_id)
-        .where(FindingRow.scan_id == scan_id)
+        select(ServiceRow, UrlRow)
+        .outerjoin(UrlRow, UrlRow.id == ServiceRow.evidence_url_id)
+        .where(ServiceRow.scan_id == scan_id)
     )
 
 

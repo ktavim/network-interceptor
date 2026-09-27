@@ -5,7 +5,7 @@ from fastapi import APIRouter, HTTPException, Request
 from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from core.db import AppRow, FindingRow, ScanRow, SubmissionRow, select_findings_with_evidence
+from core.db import AppRow, ScanRow, ServiceRow, SubmissionRow, select_services_with_evidence
 from core.enums import AuthMethod, Severity
 
 from .models import (
@@ -13,11 +13,11 @@ from .models import (
     AuthMethodChange,
     CreateAppRequest,
     ExclusionChange,
-    Finding,
     ScanDiff,
     ScanSummary,
+    Service,
 )
-from .serialize import app_to_summary, finding_to_schema, scan_to_summary
+from .serialize import app_to_summary, scan_to_summary, service_to_schema
 
 router = APIRouter()
 
@@ -29,13 +29,13 @@ def _session_factory(request: Request) -> async_sessionmaker[AsyncSession]:
 def _blocker_count_subq():
     return (
         select(
-            FindingRow.scan_id.label("scan_id"),
+            ServiceRow.scan_id.label("scan_id"),
             func.coalesce(
                 func.sum(
                     case(
                         (
-                            (FindingRow.severity == Severity.blocker.value)
-                            & (FindingRow.excluded.is_(False)),
+                            (ServiceRow.severity == Severity.blocker.value)
+                            & (ServiceRow.excluded.is_(False)),
                             1,
                         ),
                         else_=0,
@@ -44,7 +44,7 @@ def _blocker_count_subq():
                 0,
             ).label("blocker_count"),
         )
-        .group_by(FindingRow.scan_id)
+        .group_by(ServiceRow.scan_id)
         .subquery()
     )
 
@@ -116,14 +116,14 @@ async def list_app_scans(app_id: str, request: Request) -> List[ScanSummary]:
     async with factory() as session:
         agg = (
             select(
-                FindingRow.scan_id.label("scan_id"),
-                func.count(FindingRow.id).label("finding_count"),
+                ServiceRow.scan_id.label("scan_id"),
+                func.count(ServiceRow.id).label("service_count"),
                 func.coalesce(
                     func.sum(
                         case(
                             (
-                                (FindingRow.severity == Severity.blocker.value)
-                                & (FindingRow.excluded.is_(False)),
+                                (ServiceRow.severity == Severity.blocker.value)
+                                & (ServiceRow.excluded.is_(False)),
                                 1,
                             ),
                             else_=0,
@@ -132,7 +132,7 @@ async def list_app_scans(app_id: str, request: Request) -> List[ScanSummary]:
                     0,
                 ).label("blocker_count"),
             )
-            .group_by(FindingRow.scan_id)
+            .group_by(ServiceRow.scan_id)
             .subquery()
         )
         # submissions.scan_id is UNIQUE — direct join, no aggregation needed.
@@ -140,7 +140,7 @@ async def list_app_scans(app_id: str, request: Request) -> List[ScanSummary]:
             select(
                 ScanRow,
                 func.coalesce(agg.c.blocker_count, 0),
-                func.coalesce(agg.c.finding_count, 0),
+                func.coalesce(agg.c.service_count, 0),
                 SubmissionRow.submitted_at,
                 SubmissionRow.submitted_by,
             )
@@ -151,12 +151,12 @@ async def list_app_scans(app_id: str, request: Request) -> List[ScanSummary]:
         )
         result = await session.execute(stmt)
         out: list[ScanSummary] = []
-        for scan, blocker_count, finding_count, submitted_at, submitted_by in result.all():
+        for scan, blocker_count, service_count, submitted_at, submitted_by in result.all():
             out.append(
                 scan_to_summary(
                     scan,
                     blocker_count=int(blocker_count or 0),
-                    finding_count=int(finding_count or 0),
+                    service_count=int(service_count or 0),
                     submitted_at=submitted_at,
                     submitted_by=submitted_by,
                 )
@@ -164,12 +164,12 @@ async def list_app_scans(app_id: str, request: Request) -> List[ScanSummary]:
         return out
 
 
-async def _findings_by_origin(session, scan_id: str) -> Dict[Tuple[str, str, int], Finding]:
-    # Keyed on the finding's identity, the (scheme, host, port) origin.
-    pairs = (await session.execute(select_findings_with_evidence(scan_id))).all()
+async def _services_by_origin(session, scan_id: str) -> Dict[Tuple[str, str, int], Service]:
+    # Keyed on the service's identity, the (scheme, host, port) origin.
+    pairs = (await session.execute(select_services_with_evidence(scan_id))).all()
     return {
-        (finding.scheme, finding.host, finding.port): finding_to_schema(finding, evidence)
-        for finding, evidence in pairs
+        (service.scheme, service.host, service.port): service_to_schema(service, evidence)
+        for service, evidence in pairs
     }
 
 
@@ -196,38 +196,38 @@ async def app_diff(
                     status_code=404,
                     detail={"message": f"scan {scan_id} not found for app {app_id}"},
                 )
-        a = await _findings_by_origin(session, from_id)
-        b = await _findings_by_origin(session, to_id)
+        a = await _services_by_origin(session, from_id)
+        b = await _services_by_origin(session, to_id)
 
-    added: list[Finding] = [f for origin, f in b.items() if origin not in a]
-    removed: list[Finding] = [f for origin, f in a.items() if origin not in b]
+    added: list[Service] = [s for origin, s in b.items() if origin not in a]
+    removed: list[Service] = [s for origin, s in a.items() if origin not in b]
     exclusion_changes: list[ExclusionChange] = []
     auth_method_changes: list[AuthMethodChange] = []
-    for origin, b_finding in b.items():
-        a_finding = a.get(origin)
-        if not a_finding:
+    for origin, b_service in b.items():
+        a_service = a.get(origin)
+        if not a_service:
             continue
         scheme, host, port = origin
-        if a_finding.excluded != b_finding.excluded:
+        if a_service.excluded != b_service.excluded:
             exclusion_changes.append(
                 ExclusionChange(
-                    id=b_finding.id,
+                    id=b_service.id,
                     scheme=scheme,
                     host=host,
                     port=port,
-                    before=a_finding.excluded,
-                    after=b_finding.excluded,
+                    before=a_service.excluded,
+                    after=b_service.excluded,
                 )
             )
-        if a_finding.auth_method != b_finding.auth_method:
+        if a_service.auth_method != b_service.auth_method:
             auth_method_changes.append(
                 AuthMethodChange(
-                    id=b_finding.id,
+                    id=b_service.id,
                     scheme=scheme,
                     host=host,
                     port=port,
-                    before=AuthMethod(a_finding.auth_method),
-                    after=AuthMethod(b_finding.auth_method),
+                    before=AuthMethod(a_service.auth_method),
+                    after=AuthMethod(b_service.auth_method),
                 )
             )
 

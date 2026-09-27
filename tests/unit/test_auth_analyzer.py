@@ -418,7 +418,7 @@ class TestAggregateByOrigin:
         counts = {e["host"]: len(e["urls"]) for e in result}
         assert counts == {"a.com": 2, "b.com": 1}
 
-    def test_scheme_separates_findings(self):
+    def test_scheme_separates_services(self):
         # http://a.com and https://a.com are different listeners to publish, so
         # each keeps its own label and evidence: the Basic demanded over http
         # must not become the https service's label.
@@ -433,7 +433,7 @@ class TestAggregateByOrigin:
         assert result["https"]["authentication"] == "bearer"
         assert result["https"]["urls"][result["https"]["evidence_index"]]["status"] == 200
 
-    def test_port_separates_findings(self):
+    def test_port_separates_services(self):
         reqs = [
             {"url": "https://a.com/1", "authentication": "bearer"},
             {"url": "https://a.com:8443/1", "authentication": "ntlm"},
