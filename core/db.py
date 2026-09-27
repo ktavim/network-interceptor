@@ -12,7 +12,6 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     select,
-    update,
 )
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.ext.asyncio import (
@@ -74,6 +73,14 @@ class ScanRow(Base):
     max_depth: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     pages_crawled: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # The worker that claimed the scan; for diagnostics only.
+    worker_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    # Refreshed while the worker runs the scan; a stale one gets the scan reaped.
+    heartbeat_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Set by the API to cancel a running scan; the worker polls it.
+    cancel_requested_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
     findings: Mapped[list["FindingRow"]] = relationship(
         "FindingRow", back_populates="scan", cascade="all, delete-orphan"
@@ -114,7 +121,7 @@ class FindingRow(Base):
     # findings -> urls -> findings is a cycle, so use_alter for table ordering
     # (as with apps.current_scan_id) and DEFERRABLE INITIALLY DEFERRED so the
     # findings can be inserted ahead of the urls they point to within one
-    # transaction -- both ids are minted in api.translate before either insert.
+    # transaction -- both ids are minted in core.translate before either insert.
     evidence_url_id: Mapped[Optional[str]] = mapped_column(
         String,
         ForeignKey(
@@ -242,19 +249,6 @@ def make_engine() -> AsyncEngine:
 
 def make_session_factory(engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:
     return async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
-
-
-async def sweep_stale_scans(session_factory: async_sessionmaker[AsyncSession]) -> int:
-    """Mark any scans left in queued/running by a previous process as failed."""
-    async with session_factory() as session:
-        stmt = (
-            update(ScanRow)
-            .where(ScanRow.status.in_(["queued", "running"]))
-            .values(status="failed", completed_at=_utcnow(), error="server restarted")
-        )
-        result = await session.execute(stmt)
-        await session.commit()
-        return result.rowcount or 0
 
 
 async def get_session(

@@ -1,15 +1,14 @@
-import asyncio
 import logging
 import uuid
 from datetime import datetime, timezone
 from typing import List
 
 from fastapi import APIRouter, HTTPException, Request, Response, status
-from sqlalchemy import case, func, select
+from sqlalchemy import case, func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from .db import (
+from core.db import (
     AppRow,
     FindingRow,
     ScanRow,
@@ -17,22 +16,22 @@ from .db import (
     UrlRow,
     select_findings_with_evidence,
 )
+from core.enums import AuthMethod, Severity
+from core.events import emit_event
+from core.translate import severity_for
+
 from .models import (
-    AuthMethod,
     CreateScanRequest,
     CreateScanResponse,
     Finding,
     PatchFindingRequest,
     ScanDetail,
     ScanSummary,
-    Severity,
     SubmitScanResponse,
     Url,
 )
 from .routes_me import _STUB_USER
 from .serialize import finding_to_schema, scan_to_detail, scan_to_summary, url_to_schema
-from .service import run_scrape_job
-from .translate import severity_for
 
 logger = logging.getLogger(__name__)
 
@@ -203,9 +202,7 @@ async def list_finding_urls(scan_id: str, finding_id: str, request: Request) -> 
 
 @router.post("/scans", response_model=CreateScanResponse)
 async def create_scan(body: CreateScanRequest, request: Request) -> CreateScanResponse:
-    app_state = request.app.state
     factory = _session_factory(request)
-    event_bus = app_state.event_bus
 
     scan_id = uuid.uuid4().hex
     started_at = datetime.now(timezone.utc)
@@ -238,32 +235,10 @@ async def create_scan(body: CreateScanRequest, request: Request) -> CreateScanRe
                 pages_crawled=0,
             )
         )
+        # Same transaction as the scan, so no event can precede it.
+        await emit_event(session, scan_id, "scan_started", {"url": start_url, "name": name})
+        # Committing the queued scan is the whole enqueue; a worker claims it.
         await session.commit()
-
-    # Persist the seed scan_started event before responding so an immediate SSE
-    # GET sees at least one event.
-    await event_bus.emit(scan_id, "scan_started", {"url": start_url, "name": name})
-
-    task = asyncio.create_task(
-        run_scrape_job(
-            scan_id=scan_id,
-            base_config=app_state.base_config,
-            start_url=start_url,
-            max_depth=body.max_depth,
-            semaphore=app_state.semaphore,
-            session_factory=factory,
-            event_bus=event_bus,
-        ),
-        name=f"scan-{scan_id}",
-    )
-    app_state.scan_tasks[scan_id] = task
-    app_state.background_tasks.add(task)
-
-    def _cleanup(_t: asyncio.Task) -> None:
-        app_state.background_tasks.discard(_t)
-        app_state.scan_tasks.pop(scan_id, None)
-
-    task.add_done_callback(_cleanup)
 
     return CreateScanResponse(scan_id=scan_id)
 
@@ -423,7 +398,6 @@ async def submit_scan(scan_id: str, request: Request) -> SubmitScanResponse:
 
 @router.post("/scans/{scan_id}/cancel", status_code=status.HTTP_204_NO_CONTENT)
 async def cancel_scan(scan_id: str, request: Request) -> Response:
-    app_state = request.app.state
     factory = _session_factory(request)
 
     async with factory() as session:
@@ -431,18 +405,23 @@ async def cancel_scan(scan_id: str, request: Request) -> Response:
         if not scan:
             raise HTTPException(status_code=404, detail={"message": "scan not found"})
 
-    task = app_state.scan_tasks.get(scan_id)
-    if task and not task.done():
-        task.cancel()
-    else:
-        # Task already gone — record a cancellation manually.
-        async with factory() as session:
-            scan = await session.get(ScanRow, scan_id)
-            if scan and scan.status in ("queued", "running"):
-                scan.status = "cancelled"
-                scan.completed_at = datetime.now(timezone.utc)
-                scan.error = "cancelled"
-                await session.commit()
-        await app_state.event_bus.emit(scan_id, "scan_failed", {"reason": "cancelled"})
+        # Conditional updates: a worker claiming the scan concurrently can't slip between them.
+        dequeued = await session.execute(
+            update(ScanRow)
+            .where(ScanRow.id == scan_id, ScanRow.status == "queued")
+            .values(status="cancelled", completed_at=func.now(), error="cancelled")
+            .execution_options(synchronize_session=False)
+        )
+        if dequeued.rowcount:
+            await emit_event(session, scan_id, "scan_failed", {"reason": "cancelled"})
+        else:
+            # The worker running it polls this, then ends the scan and emits scan_failed.
+            await session.execute(
+                update(ScanRow)
+                .where(ScanRow.id == scan_id, ScanRow.status == "running")
+                .values(cancel_requested_at=func.now())
+                .execution_options(synchronize_session=False)
+            )
+        await session.commit()
 
     return Response(status_code=status.HTTP_204_NO_CONTENT)

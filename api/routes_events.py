@@ -5,7 +5,9 @@ import logging
 from fastapi import APIRouter, HTTPException, Request
 from sse_starlette.sse import EventSourceResponse
 
-from .db import ScanRow
+from core.db import ScanRow
+from core.events import TERMINAL_EVENTS, event_to_dict
+
 from .sse import replay_events
 
 logger = logging.getLogger(__name__)
@@ -36,47 +38,30 @@ async def scan_events(scan_id: str, request: Request):
 
     terminal = scan.status in ("completed", "failed", "cancelled")
 
-    queue: asyncio.Queue = asyncio.Queue(maxsize=1024)
+    # Subscribed before the first read, so no wake-up is missed in between.
+    wake = asyncio.Event()
     if not terminal:
-        await bus.subscribe(scan_id, queue)
+        bus.subscribe(scan_id, wake)
 
     async def event_gen():
+        next_seq = start_seq
         try:
-            replay = await replay_events(factory, scan_id, start_seq)
-            max_seq = start_seq - 1
-            for row in replay:
-                event_obj = {
-                    "scan_id": row.scan_id,
-                    "seq": str(row.seq),
-                    "ts": row.ts,
-                    "type": row.type,
-                    "payload": row.payload,
-                }
-                yield _format(row.seq, event_obj)
-                if row.seq > max_seq:
-                    max_seq = row.seq
-
-            if terminal:
-                return
-
             while True:
-                if await request.is_disconnected():
+                wake.clear()
+                for row in await replay_events(factory, scan_id, next_seq):
+                    yield _format(row.seq, event_to_dict(row))
+                    next_seq = row.seq + 1
+                    if row.type in TERMINAL_EVENTS:
+                        return
+                if terminal or await request.is_disconnected():
                     return
                 try:
-                    event = await asyncio.wait_for(queue.get(), timeout=15.0)
+                    await asyncio.wait_for(wake.wait(), timeout=15.0)
                 except asyncio.TimeoutError:
                     yield {"comment": "keepalive"}
-                    continue
-                seq_int = int(event["seq"])
-                if seq_int <= max_seq:
-                    continue
-                max_seq = seq_int
-                yield _format(event["seq"], event)
-                if event["type"] in ("scan_completed", "scan_failed"):
-                    return
         finally:
             if not terminal:
-                await bus.unsubscribe(scan_id, queue)
+                bus.unsubscribe(scan_id, wake)
 
     return EventSourceResponse(event_gen())
 
@@ -85,7 +70,7 @@ async def scan_events(scan_id: str, request: Request):
 async def notifications(request: Request):
     bus = request.app.state.event_bus
     queue: asyncio.Queue = asyncio.Queue(maxsize=1024)
-    await bus.subscribe_notifications(queue)
+    bus.subscribe_notifications(queue)
 
     async def gen():
         try:
@@ -99,6 +84,6 @@ async def notifications(request: Request):
                     continue
                 yield _format(event["seq"], event)
         finally:
-            await bus.unsubscribe_notifications(queue)
+            bus.unsubscribe_notifications(queue)
 
     return EventSourceResponse(gen())

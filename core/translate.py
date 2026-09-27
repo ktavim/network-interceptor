@@ -2,7 +2,7 @@
 import uuid
 from typing import Any, Dict, List, Tuple
 
-from .models import AuthMethod, Severity
+from .enums import AuthMethod, Severity
 
 
 def tag_to_auth_method(tag: str) -> AuthMethod:

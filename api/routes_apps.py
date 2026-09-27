@@ -5,17 +5,17 @@ from fastapi import APIRouter, HTTPException, Request
 from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from .db import AppRow, FindingRow, ScanRow, SubmissionRow, select_findings_with_evidence
+from core.db import AppRow, FindingRow, ScanRow, SubmissionRow, select_findings_with_evidence
+from core.enums import AuthMethod, Severity
+
 from .models import (
     AppSummary,
-    AuthMethod,
     AuthMethodChange,
     CreateAppRequest,
     ExclusionChange,
     Finding,
     ScanDiff,
     ScanSummary,
-    Severity,
 )
 from .serialize import app_to_summary, finding_to_schema, scan_to_summary
 

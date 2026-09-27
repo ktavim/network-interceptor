@@ -1,9 +1,9 @@
-"""Tests for api.translate."""
+"""Tests for core.translate."""
 import pytest
 
-from api.db import FindingRow, UrlRow
-from api.models import AuthMethod, Severity
-from api.translate import (
+from core.db import FindingRow, UrlRow
+from core.enums import AuthMethod, Severity
+from core.translate import (
     service_to_finding_row,
     services_to_findings,
     severity_for,

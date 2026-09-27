@@ -7,9 +7,8 @@ from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from config_loader import Config, FormConfig, load_config
+from core.db import make_engine, make_session_factory
 
-from .db import make_engine, make_session_factory, sweep_stale_scans
 from .routes_apps import router as apps_router
 from .routes_events import router as events_router
 from .routes_scans import router as scans_router
@@ -26,72 +25,22 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def _default_base_config() -> Config:
-    return Config(
-        start_url="https://placeholder.invalid",  # always overridden per-request
-        max_depth=3,
-        max_clicks_per_page=20,
-        wait_timeout=30000,
-        network_idle_timeout=2000,
-        form_filling=FormConfig(enabled=True, fill_delay=100, defaults={}),
-        exclude_patterns=None,
-        login=None,
-    )
-
-
-def _load_base_config() -> Config:
-    config_path = os.environ.get("CRAWLER_CONFIG_PATH", "./config.json")
-    if not os.path.exists(config_path):
-        logger.info("No config file at %s; using built-in defaults", config_path)
-        return _default_base_config()
-    try:
-        return load_config(config_path)
-    except Exception as e:
-        logger.warning("Failed to load config from %s (%s); using built-in defaults", config_path, e)
-        return _default_base_config()
-
-
-def _check_single_worker() -> None:
-    """In-memory state (scan_tasks, SSE subscribers, semaphore) is per-process.
-    Refuse to start with multiple workers — silent races would corrupt state."""
-    web_concurrency = os.environ.get("WEB_CONCURRENCY")
-    if web_concurrency and web_concurrency.isdigit() and int(web_concurrency) > 1:
-        raise RuntimeError(
-            f"WEB_CONCURRENCY={web_concurrency}: this server uses in-memory state and "
-            "must run with a single worker. Run uvicorn with --workers 1."
-        )
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    _check_single_worker()
-
-    app.state.base_config = _load_base_config()
-    max_parallel = int(os.environ.get("CRAWLER_MAX_PARALLEL", "2"))
-    app.state.semaphore = asyncio.Semaphore(max_parallel)
-
     engine = make_engine()
     session_factory = make_session_factory(engine)
     app.state.engine = engine
     app.state.session_factory = session_factory
 
-    swept = await sweep_stale_scans(session_factory)
-    if swept:
-        logger.warning("Marked %d stale scans as failed (server restarted)", swept)
-
     app.state.event_bus = EventBus(session_factory)
-    app.state.background_tasks: set[asyncio.Task] = set()
-    app.state.scan_tasks: dict[str, asyncio.Task] = {}
+    listener = asyncio.create_task(app.state.event_bus.run(), name="event-listener")
 
-    logger.info("Backend ready (max_parallel=%d)", max_parallel)
+    logger.info("Backend ready")
     try:
         yield
     finally:
-        tasks = list(app.state.background_tasks)
-        for t in tasks:
-            t.cancel()
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
+        listener.cancel()
+        await asyncio.gather(listener, return_exceptions=True)
         await engine.dispose()
 
 

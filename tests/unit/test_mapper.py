@@ -160,3 +160,16 @@ class TestCleanup:
         await m.cleanup()
         m.page.close.assert_called_once()
         m.browser.close.assert_called_once()
+
+    async def test_failing_step_neither_raises_nor_skips_the_rest(self, make_config):
+        # A browser that already died must not mask the cancel being unwound.
+        m = Mapper(make_config())
+        m.page = AsyncMock()
+        m.page.close.side_effect = RuntimeError("Target closed")
+        m.context = AsyncMock()
+        m.browser = AsyncMock()
+        m.playwright = AsyncMock()
+        m.playwright.stop.side_effect = RuntimeError("driver gone")
+        await m.cleanup()
+        m.context.close.assert_called_once()
+        m.browser.close.assert_called_once()

@@ -2,16 +2,16 @@
 from datetime import datetime, timezone
 from typing import Optional
 
-from .db import AppRow, FindingRow, ScanRow, UrlRow
+from core.db import AppRow, FindingRow, ScanRow, UrlRow
+from core.enums import AuthMethod, Severity
+
 from .models import (
     AppSummary,
-    AuthMethod,
     ExposureState,
     Finding,
     ScanDetail,
     ScanStatus,
     ScanSummary,
-    Severity,
     Url,
 )
 

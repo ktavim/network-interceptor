@@ -10,7 +10,7 @@ from alembic import context
 
 load_dotenv()
 
-from api.db import Base, _database_url
+from core.db import Base, _database_url
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.

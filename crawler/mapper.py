@@ -79,9 +79,13 @@ class Mapper:
 
     async def initialize(self) -> None:
         self.playwright = await async_playwright().start()
+        # The worker owns shutdown; Playwright closing the browser on a signal would fail the scan.
         self.browser = await self.playwright.chromium.launch(
             headless=True,
             args=['--disable-blink-features=AutomationControlled'],
+            handle_sigint=False,
+            handle_sigterm=False,
+            handle_sighup=False,
         )
 
         context_kwargs: Dict[str, Any] = dict(
@@ -343,11 +347,16 @@ class Mapper:
             logger.error("Error following links: %s", e)
 
     async def cleanup(self) -> None:
-        if self.page:
-            await self.page.close()
-        if self.context:
-            await self.context.close()
-        if self.browser:
-            await self.browser.close()
-        if self.playwright:
-            await self.playwright.stop()
+        # Never raises: an error here would replace the exception being unwound.
+        for obj, method in (
+            (self.page, 'close'),
+            (self.context, 'close'),
+            (self.browser, 'close'),
+            (self.playwright, 'stop'),
+        ):
+            if obj is None:
+                continue
+            try:
+                await getattr(obj, method)()
+            except Exception as e:
+                logger.warning("Cleanup: %s.%s() failed: %s", type(obj).__name__, method, e)

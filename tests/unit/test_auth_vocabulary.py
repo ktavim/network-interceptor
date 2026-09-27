@@ -11,8 +11,8 @@ import base64
 
 import pytest
 
-from api.models import AuthMethod
-from api.translate import tag_to_auth_method
+from core.enums import AuthMethod
+from core.translate import tag_to_auth_method
 from crawler.network import NetworkInterceptor
 from crawler.network.auth_analyzer import (
     _AUTH_RANK,

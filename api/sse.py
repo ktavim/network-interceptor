@@ -1,107 +1,115 @@
-"""SSE event bus: per-subscriber queues, durable replay via scan_events."""
+"""SSE event bus: Postgres NOTIFY wakes per-scan streams and feeds the notifications stream."""
 import asyncio
 import logging
-import time
-from typing import Any, Dict, Optional, Set
+from typing import Dict, Set
 
-from sqlalchemy import func, select
+import asyncpg
+from sqlalchemy import select
+from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from .db import ScanEventRow
+from core.db import ScanEventRow, _database_url
+from core.events import CHANNEL, TERMINAL_EVENTS, event_to_dict, parse_notification
 
 logger = logging.getLogger(__name__)
 
+PING_INTERVAL = 30.0
+MAX_RECONNECT_DELAY = 30.0
+
+
+def _asyncpg_dsn() -> str:
+    url = make_url(_database_url()).set(drivername="postgresql")
+    return url.render_as_string(hide_password=False)
+
 
 class EventBus:
-    """A registry of per-scan subscribers. Producers fan out to live queues
-    while persisting every event for durable resume."""
+    """Scan streams read events from the DB; a notification only wakes them."""
 
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]):
-        self._subscribers: Dict[str, Set[asyncio.Queue]] = {}
-        self._notification_subscribers: Set[asyncio.Queue] = set()
         self._session_factory = session_factory
-        self._lock = asyncio.Lock()
+        self._wakers: Dict[str, Set[asyncio.Event]] = {}
+        self._notification_subscribers: Set[asyncio.Queue] = set()
+        self._terminal: asyncio.Queue = asyncio.Queue()
 
-    def subscribers_for(self, scan_id: str) -> Set[asyncio.Queue]:
-        return self._subscribers.setdefault(scan_id, set())
+    def subscribe(self, scan_id: str, wake: asyncio.Event) -> None:
+        self._wakers.setdefault(scan_id, set()).add(wake)
 
-    async def subscribe(self, scan_id: str, queue: asyncio.Queue) -> None:
-        async with self._lock:
-            self.subscribers_for(scan_id).add(queue)
+    def unsubscribe(self, scan_id: str, wake: asyncio.Event) -> None:
+        wakers = self._wakers.get(scan_id)
+        if wakers is not None:
+            wakers.discard(wake)
+            if not wakers:
+                del self._wakers[scan_id]
 
-    async def unsubscribe(self, scan_id: str, queue: asyncio.Queue) -> None:
-        async with self._lock:
-            subs = self._subscribers.get(scan_id)
-            if subs and queue in subs:
-                subs.discard(queue)
-                if not subs:
-                    self._subscribers.pop(scan_id, None)
+    def subscribe_notifications(self, queue: asyncio.Queue) -> None:
+        self._notification_subscribers.add(queue)
 
-    async def subscribe_notifications(self, queue: asyncio.Queue) -> None:
-        async with self._lock:
-            self._notification_subscribers.add(queue)
+    def unsubscribe_notifications(self, queue: asyncio.Queue) -> None:
+        self._notification_subscribers.discard(queue)
 
-    async def unsubscribe_notifications(self, queue: asyncio.Queue) -> None:
-        async with self._lock:
-            self._notification_subscribers.discard(queue)
+    def _wake_all(self) -> None:
+        for wakers in self._wakers.values():
+            for wake in wakers:
+                wake.set()
 
-    async def next_seq(self, scan_id: str) -> int:
-        async with self._session_factory() as session:
-            stmt = select(func.coalesce(func.max(ScanEventRow.seq), -1)).where(
-                ScanEventRow.scan_id == scan_id
-            )
-            result = await session.execute(stmt)
-            current = result.scalar_one()
-            return int(current) + 1
+    # A plain def: asyncpg runs sync callbacks in arrival order.
+    def _on_notify(self, _conn, _pid, _channel, payload: str) -> None:
+        try:
+            scan_id, seq, event_type = parse_notification(payload)
+        except ValueError:
+            logger.warning("Ignoring malformed %s notification: %r", CHANNEL, payload)
+            return
+        for wake in self._wakers.get(scan_id, ()):
+            wake.set()
+        if event_type in TERMINAL_EVENTS and self._notification_subscribers:
+            self._terminal.put_nowait((scan_id, seq))
 
-    async def emit(
-        self,
-        scan_id: str,
-        event_type: str,
-        payload: Optional[Dict[str, Any]] = None,
-        seq: Optional[int] = None,
-    ) -> Dict[str, Any]:
-        """Persist + fan out an event. Returns the event dict.
-
-        Fan-out is best-effort: full subscriber queues drop and log."""
-        if seq is None:
-            seq = await self.next_seq(scan_id)
-        ts = int(time.time() * 1000)
-        payload = payload or {}
-
-        async with self._session_factory() as session:
-            session.add(
-                ScanEventRow(
-                    scan_id=scan_id,
-                    seq=seq,
-                    ts=ts,
-                    type=event_type,
-                    payload=payload,
-                )
-            )
-            await session.commit()
-
-        event = {
-            "scan_id": scan_id,
-            "seq": str(seq),
-            "ts": ts,
-            "type": event_type,
-            "payload": payload,
-        }
-
-        for queue in list(self._subscribers.get(scan_id, set())):
+    async def _dispatch_notifications(self) -> None:
+        while True:
+            scan_id, seq = await self._terminal.get()
             try:
-                queue.put_nowait(event)
-            except asyncio.QueueFull:
-                logger.warning("SSE subscriber queue full for scan %s; dropping event", scan_id)
-
-        if event_type in ("scan_completed", "scan_failed"):
+                async with self._session_factory() as session:
+                    row = await session.get(ScanEventRow, (scan_id, seq))
+            except Exception as e:
+                logger.warning("Could not read event %s/%d for notifications: %s", scan_id, seq, e)
+                continue
+            if row is None:
+                continue
+            event = event_to_dict(row)
             for queue in list(self._notification_subscribers):
                 try:
                     queue.put_nowait(event)
                 except asyncio.QueueFull:
                     logger.warning("Notification queue full; dropping event for scan %s", scan_id)
-        return event
+
+    async def run(self) -> None:
+        """LISTEN until cancelled, reconnecting whenever the connection fails."""
+        dispatcher = asyncio.create_task(self._dispatch_notifications())
+        delay = 1.0
+        try:
+            while True:
+                conn = None
+                try:
+                    conn = await asyncpg.connect(_asyncpg_dsn())
+                    await conn.add_listener(CHANNEL, self._on_notify)
+                    delay = 1.0
+                    # Whatever was emitted while disconnected woke no one.
+                    self._wake_all()
+                    while True:
+                        await asyncio.sleep(PING_INTERVAL)
+                        # An idle LISTEN connection that dies silently raises nothing by itself.
+                        await conn.fetchval("SELECT 1", timeout=5)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    logger.warning("Event listener failed (%s); reconnecting in %.0fs", e, delay)
+                finally:
+                    if conn is not None:
+                        conn.terminate()
+                await asyncio.sleep(delay)
+                delay = min(delay * 2, MAX_RECONNECT_DELAY)
+        finally:
+            dispatcher.cancel()
 
 
 async def replay_events(
