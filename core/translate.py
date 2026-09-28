@@ -79,6 +79,7 @@ def url_to_row(service_id: str, item: Dict[str, Any]) -> Dict[str, Any]:
         "url": item["url"],
         "resource_type": item.get("resource_type", "") or "",
         "status_code": int(item.get("status", 0) or 0),
+        "failure_reason": item.get("failure_reason") or None,
         "auth_method": tag_to_auth_method(item.get("authentication", "")).value,
         "sent_auth_scheme": item.get("sent_auth_scheme") or None,
         "auth_challenge": item.get("auth_challenge") or None,

@@ -171,6 +171,10 @@ class UrlRow(Base):
     url: Mapped[str] = mapped_column(String, nullable=False)
     resource_type: Mapped[str] = mapped_column(String, default="", nullable=False)
     status_code: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    # Why the request got no response, as the browser reported it
+    # ("net::ERR_NAME_NOT_RESOLVED", "net::ERR_ABORTED"); status_code is 0 then.
+    # NULL for a request that got a response.
+    failure_reason: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     # Always an AuthMethod value (tag_to_auth_method), like services.auth_method.
     auth_method: Mapped[str] = mapped_column(String, nullable=False)
     # The auth-scheme word of the Authorization header the client sent

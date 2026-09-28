@@ -172,3 +172,86 @@ class TestOnRequestFailed:
         req = mock_request(url="http://localhost:8080/x")
         await capture._on_request_failed(req, page=mock_page())
         assert interceptor.requests == []
+
+    async def test_stores_the_failure_reason(self, capture, interceptor, mock_request, mock_page):
+        req = mock_request(url="http://api.example.com/v1", failure="net::ERR_NAME_NOT_RESOLVED")
+        await capture._on_request_failed(req, page=mock_page())
+        assert interceptor.requests[0]["failure_reason"] == "net::ERR_NAME_NOT_RESOLVED"
+
+    async def test_page_url_is_read_when_the_request_fires(self, capture, interceptor, mock_request, mock_page):
+        # The navigation that aborts a request commits before the failure lands:
+        # the record must name the page that issued the request, not the next one.
+        page = mock_page("http://localhost:8080/home")
+        req = mock_request(url="http://api.example.com/v1", failure="net::ERR_ABORTED")
+        await capture._on_request(req, page=page)
+
+        page.url = "http://localhost:8080/next"
+        await capture._on_request_failed(req, page=page)
+
+        assert interceptor.requests[0]["page_url"] == "http://localhost:8080/home"
+        assert ("GET", "http://api.example.com/v1") not in capture.pending_requests
+
+    async def test_retry_with_a_response_replaces_the_failure(
+        self, capture, interceptor, mock_request, mock_response, mock_page
+    ):
+        # The aborted first attempt never saw the challenge; the retry did.
+        page = mock_page("http://localhost:8080/home")
+        first = mock_request(url="http://api.example.com/v1", failure="net::ERR_ABORTED")
+        await capture._on_request(first, page=page)
+        await capture._on_request_failed(first, page=page)
+
+        page.url = "http://localhost:8080/next"
+        retry = mock_request(url="http://api.example.com/v1")
+        await capture._on_request(retry, page=page)
+        resp = mock_response(401, {"WWW-Authenticate": "NTLM"})
+        resp.request = retry
+        await capture._on_response(resp, page=page)
+
+        assert len(interceptor.requests) == 1
+        record = interceptor.requests[0]
+        assert record["status"] == 401
+        assert record["authentication"] == "ntlm"
+        assert record["page_url"] == "http://localhost:8080/next"
+        assert "failure_reason" not in record
+        assert ("GET", "http://api.example.com/v1") in capture.captured_keys
+        assert capture.failed_records == {}
+
+    async def test_retry_finished_without_response_event_replaces_the_failure(
+        self, capture, interceptor, mock_request, mock_response, mock_page
+    ):
+        first = mock_request(url="http://api.example.com/v1", failure="net::ERR_ABORTED")
+        await capture._on_request_failed(first, page=mock_page())
+
+        retry = mock_request(url="http://api.example.com/v1")
+        retry.response = AsyncMock(return_value=mock_response(200))
+        await capture._on_request_finished(retry, page=mock_page())
+
+        assert len(interceptor.requests) == 1
+        assert interceptor.requests[0]["status"] == 200
+        assert "failure_reason" not in interceptor.requests[0]
+
+    async def test_repeated_failure_keeps_one_record(self, capture, interceptor, mock_request, mock_page):
+        first = mock_request(url="http://api.example.com/v1", failure="net::ERR_ABORTED")
+        await capture._on_request_failed(first, page=mock_page("http://localhost:8080/home"))
+        again = mock_request(url="http://api.example.com/v1", failure="net::ERR_CONNECTION_RESET")
+        await capture._on_request(again, page=mock_page())
+        await capture._on_request_failed(again, page=mock_page())
+
+        assert len(interceptor.requests) == 1
+        assert interceptor.requests[0]["failure_reason"] == "net::ERR_ABORTED"
+        assert capture.pending_requests == {}
+
+    async def test_failure_after_a_response_is_ignored(
+        self, capture, interceptor, mock_request, mock_response, mock_page
+    ):
+        # A body download cut off after the headers: the response already
+        # recorded the status and challenge, which a failure record must not replace.
+        req = mock_request(url="http://api.example.com/v1", failure="net::ERR_CONNECTION_RESET")
+        resp = mock_response(200)
+        resp.request = req
+        await capture._on_response(resp, page=mock_page())
+        await capture._on_request_failed(req, page=mock_page())
+
+        assert len(interceptor.requests) == 1
+        assert interceptor.requests[0]["status"] == 200
+        assert capture.failed_records == {}

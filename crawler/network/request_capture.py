@@ -18,6 +18,10 @@ class RequestCapture:
         self.start_origin = origin_of(start_url)
         self.pending_requests: dict = {}
         self.captured_keys: set = set()
+        # Keys whose only record so far is a failed request, mapped to that
+        # record. A failure is not final: a later attempt at the same URL that
+        # gets further replaces it (_replace_failed).
+        self.failed_records: dict = {}
 
     def attach(self, page: Page, context: BrowserContext) -> None:
         """Attach listeners to the main page and future pages opened in the context."""
@@ -32,6 +36,15 @@ class RequestCapture:
     @staticmethod
     def _key(request) -> tuple:
         return (request.method, request.url)
+
+    def _replace_failed(self, key: tuple) -> None:
+        """Drop the failed record for `key`, if any, so the attempt being
+        captured now takes its place -- e.g. a retry that got the 401 challenge
+        the first, aborted attempt never saw."""
+        failed = self.failed_records.pop(key, None)
+        if failed is not None:
+            # By identity: == would match any record with equal fields.
+            self.interceptor.requests[:] = [r for r in self.interceptor.requests if r is not failed]
 
     def _setup_page(self, target_page: Page) -> None:
         # Each handler is bound to the page it listens on so it can read that
@@ -61,6 +74,7 @@ class RequestCapture:
         if not request_data:
             request_data = await self.interceptor.handle_request(request, page.url)
 
+        self._replace_failed(key)
         try:
             await self.interceptor.handle_response(request_data, response)
         except Exception as e:
@@ -73,15 +87,24 @@ class RequestCapture:
         if not self._is_external_url(request.url):
             return
         key = self._key(request)
-        if key in self.captured_keys:
+        # The record made when the request fired carries the page that issued
+        # it. Reading page.url now could name the page a navigation moved on to,
+        # and that navigation is often what aborted the request.
+        request_data = self.pending_requests.pop(key, None)
+        # Already answered, or already recorded as failed: one record per key.
+        if key in self.captured_keys or key in self.failed_records:
             return
+        if request_data is None:
+            request_data = await self.interceptor.handle_request(request, page.url)
 
-        request_data = await self.interceptor.handle_request(request, page.url)
-        logger.debug("Request failed for %s %s: %s", request.method, request.url,
-                     getattr(request, 'failure', None))
+        failure = request.failure
+        logger.debug("Request failed for %s %s: %s", request.method, request.url, failure)
         request_data['status'] = 0
+        # The browser's error text, e.g. "net::ERR_NAME_NOT_RESOLVED".
+        request_data['failure_reason'] = failure
         self.interceptor.requests.append(request_data)
-        self.captured_keys.add(key)
+        # Not captured_keys: a later attempt that gets a response replaces this.
+        self.failed_records[key] = request_data
 
     async def _on_request_finished(self, request, page: Page) -> None:
         if not self._is_external_url(request.url):
@@ -92,6 +115,7 @@ class RequestCapture:
 
         request_data = self.pending_requests.get(key) or await self.interceptor.handle_request(request, page.url)
 
+        self._replace_failed(key)
         try:
             response = await request.response()
             if response is not None:

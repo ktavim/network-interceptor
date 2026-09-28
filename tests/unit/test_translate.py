@@ -111,6 +111,7 @@ class TestUrlToRow:
         assert row["url"] == "https://api.example.com/v1/items"
         assert row["resource_type"] == "xhr"
         assert row["status_code"] == 401
+        assert row["failure_reason"] is None
         assert row["auth_method"] == AuthMethod.basic.value
         assert row["sent_auth_scheme"] == "Basic"
         assert row["auth_challenge"] == 'Basic realm="x"'
@@ -138,6 +139,12 @@ class TestUrlToRow:
         assert row["auth_challenge"] is None
         assert row["idp_redirect"] is None
         assert row["page_url"] == ""
+        assert row["failure_reason"] is None
+
+    def test_failure_reason_carried(self):
+        row = url_to_row("service-1", {**_URL_ITEM, "status": 0, "failure_reason": "net::ERR_ABORTED"})
+        assert row["status_code"] == 0
+        assert row["failure_reason"] == "net::ERR_ABORTED"
 
     def test_missing_url_is_a_producer_bug(self):
         with pytest.raises(KeyError):

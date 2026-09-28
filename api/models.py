@@ -32,6 +32,8 @@ class Url(BaseModel):
     url: str
     resource_type: str
     status_code: int
+    # The browser's error text when the request got no response (status_code 0).
+    failure_reason: Optional[str] = None
     auth_method: AuthMethod
     sent_auth_scheme: Optional[str] = None
     auth_challenge: Optional[str] = None
