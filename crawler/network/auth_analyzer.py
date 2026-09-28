@@ -393,7 +393,10 @@ def strip_url(url: str) -> str:
 # "other", a scheme the tool cannot name and so one the publish does not
 # support -- the review tier sits below them (negotiate, a known scheme whose
 # mechanism went unresolved, then the "unknown" fallback), and "no auth
-# observed" ranks lowest. aggregate_by_origin takes the maximum over an
+# observed" ranks lowest of the answers. Below it is "no_response", a request
+# that sent no credentials and got no answer at all: review-tier, but any
+# answer from the origin outranks it, so it labels an origin only when nothing
+# on it answered. aggregate_by_origin takes the maximum over an
 # origin's requests: every URL must be publishable, so an origin is as hard as
 # its hardest URL, and a URL that only takes an unsupported scheme is never
 # masked by an accepted credential elsewhere on the origin.
@@ -411,6 +414,7 @@ _AUTH_RANK = {
     "oauth": 2,
     "api_key": 1,
     "unauthenticated": 0,
+    "no_response": -1,
 }
 
 
@@ -418,7 +422,8 @@ def _auth_rank(value: str) -> int:
     """Rank an authentication tag by its scheme for origin aggregation.
 
     The crawler's tags are a closed set -- a detect_authentication tag, the scheme
-    tag a 401 challenge resolved to, or an "oauth" IdP redirect -- and they are the
+    tag a 401 challenge resolved to, an "oauth" IdP redirect, or "no_response" for
+    a failed request that sent no credentials -- and they are the
     keys of _AUTH_RANK, so the table is the whole classification and matching is
     exact. Those keys are also the tags translate.tag_to_auth_method maps to
     AuthMethod, so an origin's rank agrees with the scheme the FE will ultimately show.
@@ -435,7 +440,8 @@ def _auth_rank(value: str) -> int:
     publishable scheme, so a known path is preferred over one the tool cannot
     vouch for and an endpoint is not blocked for also offering an unnamed
     scheme. Below negotiate comes the "unknown" fallback (reached only by a tag
-    outside the set), and every named scheme outranks unauthenticated.
+    outside the set), and every named scheme outranks unauthenticated, which
+    outranks no_response: an answer without credentials is still an answer.
     """
     return _AUTH_RANK.get((value or "").strip().lower(), _AUTH_RANK["unknown"])
 

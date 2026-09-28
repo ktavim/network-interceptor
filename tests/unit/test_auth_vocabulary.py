@@ -8,12 +8,13 @@ leaves dead entries behind, as the retired "/oidc" and "apikey" branches did.
 These tests pin the vocabulary from both ends.
 """
 import base64
+from unittest.mock import MagicMock
 
 import pytest
 
 from core.enums import AuthMethod
 from core.translate import tag_to_auth_method
-from crawler.network import NetworkInterceptor
+from crawler.network import NetworkInterceptor, RequestCapture
 from crawler.network.auth_analyzer import (
     _AUTH_RANK,
     aggregate_by_origin,
@@ -32,6 +33,7 @@ CRAWLER_AUTH_TAGS = {
     "api_key",
     "other",
     "unauthenticated",
+    "no_response",
 }
 
 _KRB5_OID = bytes((0x2a, 0x86, 0x48, 0x86, 0xf7, 0x12, 0x01, 0x02, 0x02))
@@ -43,7 +45,7 @@ def _negotiate_kerberos() -> str:
     return "Negotiate " + base64.b64encode(raw).decode("ascii")
 
 
-def _observed_tags() -> set:
+async def _observed_tags() -> set:
     """Drive every producer that writes 'authentication' and collect its tags."""
     tags = set()
 
@@ -78,16 +80,23 @@ def _observed_tags() -> set:
     )
     tags.add(request_data["authentication"])
 
+    # A failed request that sent no credentials is relabeled "no_response".
+    capture = RequestCapture(interceptor, "http://localhost")
+    failed = MagicMock(method="GET", url="http://a.com/x", headers={},
+                       resource_type="fetch", failure="net::ERR_ABORTED")
+    await capture._on_request_failed(failed, page=MagicMock(url="http://localhost/"))
+    tags.add(interceptor.requests[-1]["authentication"])
+
     # aggregate_by_origin's default for a request that never got a label at all.
     tags.add(aggregate_by_origin([{"url": "http://a.com/1"}])[0]["authentication"])
 
     return tags
 
 
-def test_producers_emit_exactly_the_known_vocabulary():
+async def test_producers_emit_exactly_the_known_vocabulary():
     # Both directions matter: an unknown tag degrades to unknown/review, and a tag
     # nothing emits leaves dead entries in the two classifiers.
-    assert _observed_tags() == CRAWLER_AUTH_TAGS
+    assert await _observed_tags() == CRAWLER_AUTH_TAGS
 
 
 @pytest.mark.parametrize("tag", sorted(CRAWLER_AUTH_TAGS))

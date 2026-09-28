@@ -37,6 +37,10 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
+# The auth methods a manual correction may replace, and so never set: the ones
+# that mean the crawler could not tell what the service takes.
+_FILL_IN_AUTH_METHODS = (AuthMethod.unknown.value, AuthMethod.no_response.value)
+
 
 def _session_factory(request: Request) -> async_sessionmaker[AsyncSession]:
     return request.app.state.session_factory
@@ -275,18 +279,19 @@ async def patch_service(
 
         if body.auth_method is not None:
             # Manual auth correction is allowed only as a fill-in for what the
-            # crawler couldn't classify — never to override an auto-detected
-            # method, and never back to "unknown". "other" (a real but unnamed
-            # challenge) counts as classified, so it stays locked here too.
-            if service.auth_method != AuthMethod.unknown.value:
+            # crawler couldn't classify ("unknown") or never got an answer from
+            # ("no_response") — never to override an auto-detected method, and
+            # never back to either. "other" (a real but unnamed challenge)
+            # counts as classified, so it stays locked here too.
+            if service.auth_method not in _FILL_IN_AUTH_METHODS:
                 raise HTTPException(
                     status_code=409,
-                    detail={"message": "auth method can only be set manually while it is unknown"},
+                    detail={"message": "auth method can only be set manually while it is unknown or no_response"},
                 )
-            if body.auth_method == AuthMethod.unknown:
+            if body.auth_method.value in _FILL_IN_AUTH_METHODS:
                 raise HTTPException(
                     status_code=422,
-                    detail={"message": "cannot set auth method to unknown"},
+                    detail={"message": f"cannot set auth method to {body.auth_method.value}"},
                 )
             service.auth_method = body.auth_method.value
             # Severity is derived from the auth method, so re-derive it using

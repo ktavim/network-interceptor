@@ -178,6 +178,18 @@ class TestOnRequestFailed:
         await capture._on_request_failed(req, page=mock_page())
         assert interceptor.requests[0]["failure_reason"] == "net::ERR_NAME_NOT_RESOLVED"
 
+    async def test_without_credentials_is_labeled_no_response(self, capture, interceptor, mock_request, mock_page):
+        # No answer means no evidence the server takes bare requests.
+        req = mock_request(url="http://api.example.com/v1", failure="net::ERR_ABORTED")
+        await capture._on_request_failed(req, page=mock_page())
+        assert interceptor.requests[0]["authentication"] == "no_response"
+
+    async def test_keeps_the_scheme_it_sent(self, capture, interceptor, mock_request, mock_page):
+        req = mock_request(url="http://api.example.com/v1", headers={"authorization": "Bearer abc"},
+                           failure="net::ERR_ABORTED")
+        await capture._on_request_failed(req, page=mock_page())
+        assert interceptor.requests[0]["authentication"] == "bearer"
+
     async def test_page_url_is_read_when_the_request_fires(self, capture, interceptor, mock_request, mock_page):
         # The navigation that aborts a request commits before the failure lands:
         # the record must name the page that issued the request, not the next one.

@@ -12,6 +12,7 @@ class AuthMethod(str, Enum):
     mtls = "mtls"
     other = "other"
     unauthenticated = "unauthenticated"
+    no_response = "no_response"
     unknown = "unknown"
 
 

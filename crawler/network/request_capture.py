@@ -102,6 +102,11 @@ class RequestCapture:
         request_data['status'] = 0
         # The browser's error text, e.g. "net::ERR_NAME_NOT_RESOLVED".
         request_data['failure_reason'] = failure
+        # "unauthenticated" is a claim that the server answered a bare request,
+        # which a failure cannot back. A scheme the request sent is still what
+        # the client uses, so that label stands.
+        if request_data['authentication'] == 'unauthenticated':
+            request_data['authentication'] = 'no_response'
         self.interceptor.requests.append(request_data)
         # Not captured_keys: a later attempt that gets a response replaces this.
         self.failed_records[key] = request_data

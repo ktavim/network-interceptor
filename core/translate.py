@@ -13,6 +13,7 @@ def tag_to_auth_method(tag: str) -> AuthMethod:
     - auth_analyzer.detect_authentication() — ntlm, kerberos, negotiate, basic, bearer, api_key, other, unauthenticated
     - auth_analyzer.detect_auth_challenge() — the same short tags for a 401's demanded scheme: basic, bearer, ntlm, kerberos, negotiate, other (raw challenge kept separately in 'auth_challenge')
     - interceptor._apply_idp_redirect() — "oauth" (the IdP host kept separately in 'idp_redirect')
+    - request_capture._on_request_failed() — "no_response" for a failed request that sent no credentials (the browser's error kept separately in 'failure_reason')
 
     "negotiate" means SPNEGO whose concrete mechanism was unresolvable: NTLM and
     Kerberos are already resolved to their own tags upstream, so it is not a
@@ -36,12 +37,13 @@ def severity_for(auth_method: AuthMethod) -> Severity:
     scheme the crawler could not name: not on the supported list means
     unsupported until someone names it in the detector. Review is for what
     cannot be told yet -- "negotiate" is SPNEGO whose mechanism (Kerberos or
-    NTLM) went unresolved, and "unknown" means a producer drifted from the
-    vocabulary, which the manual auth-method override exists to fill in.
+    NTLM) went unresolved, "no_response" is an origin none of whose requests
+    got an answer, and "unknown" means a producer drifted from the vocabulary.
+    The manual auth-method override exists to fill in the last two.
     """
     if auth_method in (AuthMethod.ntlm, AuthMethod.basic, AuthMethod.other):
         return Severity.blocker
-    if auth_method in (AuthMethod.negotiate, AuthMethod.unknown):
+    if auth_method in (AuthMethod.negotiate, AuthMethod.no_response, AuthMethod.unknown):
         return Severity.review
     return Severity.cleared
 

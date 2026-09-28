@@ -567,6 +567,34 @@ class TestAggregateByOrigin:
         result = aggregate_by_origin(reqs)
         assert result[0]["authentication"] == "oauth"
 
+    def test_any_answer_outranks_no_response(self):
+        # A 200 without credentials shows the origin takes bare requests; an
+        # aborted request next to it must not send the origin to review.
+        reqs = [
+            {"url": "http://a.com/config", "authentication": "no_response", "status": 0},
+            {"url": "http://a.com/data", "authentication": "unauthenticated", "status": 200},
+        ]
+        result = aggregate_by_origin(reqs)
+        assert result[0]["authentication"] == "unauthenticated"
+        assert result[0]["evidence_index"] == 1
+
+    def test_no_response_labels_an_origin_nothing_answered(self):
+        reqs = [
+            {"url": "http://a.com/1", "authentication": "no_response", "status": 0},
+            {"url": "http://a.com/2", "authentication": "no_response", "status": 0},
+        ]
+        result = aggregate_by_origin(reqs)
+        assert result[0]["authentication"] == "no_response"
+        assert result[0]["evidence_index"] == 0
+
+    def test_sent_scheme_on_a_failed_request_outranks_no_response(self):
+        reqs = [
+            {"url": "http://a.com/1", "authentication": "no_response", "status": 0},
+            {"url": "http://a.com/2", "authentication": "bearer", "status": 0},
+        ]
+        result = aggregate_by_origin(reqs)
+        assert result[0]["authentication"] == "bearer"
+
     @pytest.mark.parametrize("url", ["not-a-url", "data:text/plain,hi", "http://a.com:bad/x"])
     def test_skips_requests_without_origin(self, url):
         reqs = [{"url": url, "authentication": "unauthenticated"}]
