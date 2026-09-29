@@ -100,7 +100,7 @@ _URL_ITEM = {
     "authentication": "basic",
     "sent_auth_scheme": "Basic",
     "auth_challenge": 'Basic realm="x"',
-    "idp_redirect": None,
+    "redirect_url": None,
     "page_url": "https://app.example.com/page",
 }
 
@@ -117,7 +117,7 @@ class TestUrlToRow:
         assert row["auth_method"] == AuthMethod.basic.value
         assert row["sent_auth_scheme"] == "Basic"
         assert row["auth_challenge"] == 'Basic realm="x"'
-        assert row["idp_redirect"] is None
+        assert row["redirect_url"] is None
         assert row["page_url"] == "https://app.example.com/page"
         assert row["id"]
 
@@ -139,9 +139,13 @@ class TestUrlToRow:
         assert row["auth_method"] == AuthMethod.unknown.value
         assert row["sent_auth_scheme"] is None
         assert row["auth_challenge"] is None
-        assert row["idp_redirect"] is None
+        assert row["redirect_url"] is None
         assert row["page_url"] == ""
         assert row["failure_reason"] is None
+
+    def test_redirect_url_carried(self):
+        row = url_to_row("service-1", {**_URL_ITEM, "status": 302, "redirect_url": "https://a.com/login"})
+        assert row["redirect_url"] == "https://a.com/login"
 
     def test_failure_reason_carried(self):
         row = url_to_row("service-1", {**_URL_ITEM, "status": 0, "failure_reason": "net::ERR_ABORTED"})

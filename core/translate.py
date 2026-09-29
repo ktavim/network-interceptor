@@ -12,7 +12,7 @@ def tag_to_auth_method(tag: str) -> AuthMethod:
     constructor is the whole mapping. Sources:
     - auth_analyzer.detect_authentication() — ntlm, kerberos, negotiate, basic, bearer, api_key, other, unauthenticated
     - auth_analyzer.detect_auth_challenge() — the same short tags for a 401's demanded scheme: basic, bearer, ntlm, kerberos, negotiate, other (raw challenge kept separately in 'auth_challenge')
-    - interceptor._apply_idp_redirect() — "oauth" (the IdP host kept separately in 'idp_redirect')
+    - interceptor._apply_redirect() — "oauth" for a redirect to an IdP (the target kept separately in 'redirect_url')
     - request_capture._on_request_failed() — "no_response" for a failed request that sent no credentials (the browser's error kept separately in 'failure_reason')
 
     "negotiate" means SPNEGO whose concrete mechanism was unresolvable: NTLM and
@@ -85,7 +85,7 @@ def url_to_row(service_id: str, item: Dict[str, Any]) -> Dict[str, Any]:
         "auth_method": tag_to_auth_method(item.get("authentication", "")).value,
         "sent_auth_scheme": item.get("sent_auth_scheme") or None,
         "auth_challenge": item.get("auth_challenge") or None,
-        "idp_redirect": item.get("idp_redirect") or None,
+        "redirect_url": item.get("redirect_url") or None,
         "page_url": item.get("page_url", "") or "",
     }
 

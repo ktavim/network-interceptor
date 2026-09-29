@@ -37,7 +37,9 @@ class Url(BaseModel):
     auth_method: AuthMethod
     sent_auth_scheme: Optional[str] = None
     auth_challenge: Optional[str] = None
-    idp_redirect: Optional[str] = None
+    # A redirect's target (query, fragment and userinfo stripped); None when
+    # the response was not a redirect.
+    redirect_url: Optional[str] = None
     page_url: str
 
 
@@ -53,8 +55,8 @@ class Service(BaseModel):
     request_count: int
     ips: Optional[List[str]] = None
     # The captured request whose authentication classification won for this
-    # origin. It is the service's evidence: status, page, challenge and IdP
-    # redirect. None only for a service that has no such row.
+    # origin. It is the service's evidence: status, page, challenge and
+    # redirect URL. None only for a service that has no such row.
     evidence: Optional[Url] = None
     excluded: bool
 

@@ -75,7 +75,7 @@ async def _observed_tags() -> set:
 
     # A 3xx handing off to an IdP relabels it "oauth".
     request_data = {}
-    interceptor._apply_idp_redirect(
+    interceptor._apply_redirect(
         {"location": "https://dev-1.okta.com/oauth2/v1/authorize"}, request_data, {}
     )
     tags.add(request_data["authentication"])

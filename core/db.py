@@ -122,7 +122,7 @@ class ServiceRow(Base):
     ips: Mapped[Optional[list[str]]] = mapped_column(ARRAY(String), nullable=True)
     # The url row that is this service's evidence: the captured request whose
     # authentication classification won in aggregate_by_origin. The service's
-    # status, page, challenge and IdP redirect are all read from that row.
+    # status, page, challenge and redirect URL are all read from that row.
     # Nullable: a service can point nowhere (rows that predate the pointer).
     # services -> urls -> services is a cycle, so use_alter for table ordering
     # (as with apps.current_scan_id) and DEFERRABLE INITIALLY DEFERRED so the
@@ -184,7 +184,10 @@ class UrlRow(Base):
     # exchange: what the client sent and what the server demanded.
     sent_auth_scheme: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     auth_challenge: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    idp_redirect: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    # A 3xx's Location, resolved against url and stripped like it; NULL for
+    # any other response. Kept for every redirect, not just IdP handoffs
+    # (those are the rows whose auth_method is "oauth").
+    redirect_url: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     page_url: Mapped[str] = mapped_column(String, default="", nullable=False)
 
     service: Mapped[ServiceRow] = relationship(

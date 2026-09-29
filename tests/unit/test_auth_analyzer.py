@@ -6,7 +6,7 @@ from crawler.network.auth_analyzer import (
     detect_authentication,
     sent_auth_scheme,
     detect_auth_challenge,
-    detect_idp_redirect,
+    is_idp_redirect,
     aggregate_by_origin,
     _parse_challenges,
     strip_url,
@@ -343,54 +343,50 @@ class TestDetectAuthChallenge:
         assert _parse_challenges('NTLM, =, Bearer realm="x"') == [("NTLM", None), ("Bearer", None)]
 
 
-class TestDetectIdpRedirect:
-    # A known IdP host resolves to the host -- tenant included.
-    @pytest.mark.parametrize("url,expected", [
-        ("https://myapp.auth0.com/authorize", "myapp.auth0.com"),
-        ("https://dev-123.okta.com/oauth2/default", "dev-123.okta.com"),
-        ("https://dev-123.oktapreview.com/app", "dev-123.oktapreview.com"),
-        ("https://login.microsoftonline.com/t/oauth2", "login.microsoftonline.com"),
-        ("https://accounts.google.com/o/oauth2/auth", "accounts.google.com"),
-        ("https://cognito-idp.us-east-1.amazonaws.com/p", "cognito-idp.us-east-1.amazonaws.com"),
-        ("https://mypool.amazoncognito.com/login", "mypool.amazoncognito.com"),
-        ("https://app.onelogin.com/trust/saml2", "app.onelogin.com"),
-        ("https://sso.pingidentity.com/sso", "sso.pingidentity.com"),
+class TestIsIdpRedirect:
+    @pytest.mark.parametrize("url", [
+        "https://myapp.auth0.com/authorize",
+        "https://dev-123.okta.com/oauth2/default",
+        "https://dev-123.oktapreview.com/app",
+        "https://login.microsoftonline.com/t/oauth2",
+        "https://accounts.google.com/o/oauth2/auth",
+        "https://cognito-idp.us-east-1.amazonaws.com/p",
+        "https://mypool.amazoncognito.com/login",
+        "https://app.onelogin.com/trust/saml2",
+        "https://sso.pingidentity.com/sso",
     ])
-    def test_known_idp_host(self, url, expected):
-        assert detect_idp_redirect(url) == expected
+    def test_known_idp_host(self, url):
+        assert is_idp_redirect(url) is True
 
-    # An OAuth/OIDC-shaped path on an unknown host keeps the path, so the weaker
-    # claim ("looks like an authorization endpoint") stays distinguishable from a
-    # known IdP host.
-    @pytest.mark.parametrize("url,expected", [
-        ("https://mysite.com/oauth/authorize", "mysite.com/oauth/authorize"),
-        ("https://mysite.com/oidc/auth", "mysite.com/oidc/auth"),
+    # An OAuth/OIDC-shaped path on an unknown host counts too: it looks like an
+    # authorization endpoint, often the app's own.
+    @pytest.mark.parametrize("url", [
+        "https://mysite.com/oauth/authorize",
+        "https://mysite.com/oidc/auth",
     ])
-    def test_generic_oauth_path(self, url, expected):
-        assert detect_idp_redirect(url) == expected
+    def test_generic_oauth_path(self, url):
+        assert is_idp_redirect(url) is True
 
-    def test_relative_location_stays_truthy(self):
-        # A relative Location has no netloc; the path alone must still be a
-        # non-empty (truthy) result or the caller would drop the detection.
-        assert detect_idp_redirect("/oauth/authorize") == "/oauth/authorize"
+    def test_relative_location(self):
+        # A relative Location has no host; the path alone decides.
+        assert is_idp_redirect("/oauth/authorize") is True
 
-    def test_query_string_dropped(self):
-        # state/nonce/redirect_uri must not survive into the stored evidence.
-        assert detect_idp_redirect(
+    def test_query_string_ignored_for_known_path(self):
+        assert is_idp_redirect(
             "https://mysite.com/oauth/authorize?state=abc&redirect_uri=/cb"
-        ) == "mysite.com/oauth/authorize"
+        ) is True
 
     def test_no_match(self):
-        assert detect_idp_redirect("https://www.example.com/dashboard") is None
+        assert is_idp_redirect("https://www.example.com/dashboard") is False
 
     def test_empty_string(self):
-        assert detect_idp_redirect("") is None
+        assert is_idp_redirect("") is False
 
     def test_oauth_in_query_not_path(self):
-        assert detect_idp_redirect("https://example.com/login?r=/oauth/cb") is None
+        assert is_idp_redirect("https://example.com/login?r=/oauth/cb") is False
 
     def test_case_insensitive_domain(self):
-        assert detect_idp_redirect("https://MyApp.Auth0.COM/authorize") == "myapp.auth0.com"
+        assert is_idp_redirect("https://MyApp.Auth0.COM/authorize") is True
 
 
 def _origins(result) -> set:

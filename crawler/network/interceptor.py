@@ -1,6 +1,7 @@
 """Network request/response interceptor for Playwright."""
 import logging
 from typing import Any, Dict, List, Optional
+from urllib.parse import urljoin
 
 from playwright.async_api import Request, Response
 
@@ -58,7 +59,7 @@ class NetworkInterceptor:
                 self._apply_auth_challenge(headers, request_data, response_data)
 
             if status in (301, 302, 303, 307, 308):
-                self._apply_idp_redirect(headers, request_data, response_data)
+                self._apply_redirect(headers, request_data, response_data)
 
             # Built as a separate dict and merged only once every field is
             # resolved, so a mid-flight failure leaves no partial response keys
@@ -93,16 +94,21 @@ class NetworkInterceptor:
         # raw challenge lives in the 'auth_challenge' key set above for evidence.
         request_data['authentication'] = auth_analyzer.detect_auth_challenge(auth_challenge)
 
-    def _apply_idp_redirect(self, headers, request_data, response_data) -> None:
+    def _apply_redirect(self, headers, request_data, response_data) -> None:
         location = self._get_header_value(headers, 'Location')
         if not location:
             return
-        idp = auth_analyzer.detect_idp_redirect(location)
-        if idp:
-            response_data['idp_redirect'] = idp
+        # Every redirect's target is kept, resolved against the request URL so
+        # a relative Location is comparable with 'url', and stripped like it:
+        # a Location is where OAuth state/nonce/login_hint, authorization
+        # codes, implicit-flow tokens (in the fragment) and SAMLRequest travel.
+        response_data['redirect_url'] = auth_analyzer.strip_url(
+            urljoin(request_data.get('url', ''), location)
+        )
+        if auth_analyzer.is_idp_redirect(location):
             # As in _apply_auth_challenge, the label carries only the resolved
-            # scheme; the IdP host that matched lives in the 'idp_redirect' key
-            # set above for evidence.
+            # scheme; the target lives in the 'redirect_url' key set above for
+            # evidence.
             request_data['authentication'] = "oauth"
 
     @staticmethod

@@ -340,39 +340,28 @@ _IDP_DOMAINS = (
 )
 
 
-def detect_idp_redirect(location: str) -> Optional[str]:
-    """Detect if a Location URL points to an Identity Provider.
+def is_idp_redirect(location: str) -> bool:
+    """Whether a Location URL hands off to an Identity Provider.
 
-    Returns the matched host as raw evidence:
-    the host preserves the tenant (which Okta org, which Cognito pool). Callers treat
-    any non-None result as "this redirect is an IdP handoff" -- that boolean, not
-    the string, is what drives classification.
+    True for a known IdP host, or for an OAuth/OIDC-shaped path on any other
+    host (often the app's own authorization endpoint), including a relative
+    Location ("/oauth/authorize"), which has no host at all. Only the host and
+    path are examined; "/oauth" in the query does not count.
 
-    Two shapes are returned, so the weaker match stays distinguishable:
-    - a known IdP host  -> the host alone ("myapp.auth0.com"), asserting the host
-      *is* an IdP;
-    - an OAuth/OIDC-shaped path on any other host -> "host/path"
-      ("mysite.com/oauth/authorize"), asserting only that the endpoint looks like
-      an authorization endpoint -- it is often the app's own. Carrying the path
-      also keeps the result non-empty for a relative Location ("/oauth/authorize"),
-      which has no netloc at all.
-
-    The query string is always dropped: it carries state/nonce/redirect_uri and,
-    on some providers, user identifiers that don't belong in a stored record.
+    Classification only: the redirect target itself is kept by the caller as
+    evidence (NetworkInterceptor._apply_redirect), and the tenant, path and
+    known-host-or-path distinction can all be read back from it.
     """
     try:
         parsed = urlparse(location)
         domain = parsed.netloc.lower()
-
-        if any(idp in domain for idp in _IDP_DOMAINS):
-            return domain
-
-        if '/oauth' in parsed.path or '/oidc' in parsed.path:
-            return f"{domain}{parsed.path}"
-
-        return None
+        return (
+            any(idp in domain for idp in _IDP_DOMAINS)
+            or '/oauth' in parsed.path
+            or '/oidc' in parsed.path
+        )
     except Exception:
-        return None
+        return False
 
 
 def strip_url(url: str) -> str:
@@ -462,7 +451,7 @@ def aggregate_by_origin(requests: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     `evidence_index` is the position in `urls` of the request whose
     authentication classification "wins" (the first one seen at the winning
     rank). That row is the service's evidence: the FE presents its status, page,
-    challenge and IdP redirect, so no separate evidence sample is kept here.
+    challenge and redirect URL, so no separate evidence sample is kept here.
     """
     result_map: Dict[Origin, Dict[str, Any]] = {}
     for req in requests:

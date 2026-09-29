@@ -131,13 +131,13 @@ class TestHandleResponse:
         assert result["authentication"] == "negotiate"
 
     async def test_302_idp(self, interceptor, mock_response):
-        # The label carries only the scheme; the IdP host stays in 'idp_redirect'.
+        # The label carries only the scheme; the target stays in 'redirect_url'.
         req_data = {"url": "http://a.com", "authentication": "unauthenticated"}
         result = await interceptor.handle_response(
             req_data, mock_response(302, {"location": "https://x.auth0.com/authorize"})
         )
         assert result["authentication"] == "oauth"
-        assert result["idp_redirect"] == "x.auth0.com"
+        assert result["redirect_url"] == "https://x.auth0.com/authorize"
 
     async def test_307_idp(self, interceptor, mock_response):
         req_data = {"url": "http://a.com", "authentication": "unauthenticated"}
@@ -145,24 +145,64 @@ class TestHandleResponse:
             req_data, mock_response(307, {"location": "https://login.microsoftonline.com/t/oauth2"})
         )
         assert result["authentication"] == "oauth"
-        assert result["idp_redirect"] == "login.microsoftonline.com"
+        assert result["redirect_url"] == "https://login.microsoftonline.com/t/oauth2"
 
     async def test_302_relative_oauth_location(self, interceptor, mock_response):
         # A same-origin relative redirect to an authorization endpoint still
-        # classifies -- the path keeps the detection truthy despite the empty host.
-        req_data = {"url": "http://a.com", "authentication": "unauthenticated"}
+        # classifies, and its target is resolved against the request URL.
+        req_data = {"url": "http://a.com/app/page", "authentication": "unauthenticated"}
         result = await interceptor.handle_response(
             req_data, mock_response(302, {"location": "/oauth/authorize"})
         )
         assert result["authentication"] == "oauth"
-        assert result["idp_redirect"] == "/oauth/authorize"
+        assert result["redirect_url"] == "http://a.com/oauth/authorize"
 
     async def test_301_non_idp(self, interceptor, mock_response):
+        # A redirect that is no IdP handoff leaves the label alone but still
+        # records its target.
         req_data = {"url": "http://a.com", "authentication": "unauthenticated"}
         result = await interceptor.handle_response(
             req_data, mock_response(301, {"location": "https://example.com/new"})
         )
         assert result["authentication"] == "unauthenticated"
+        assert result["redirect_url"] == "https://example.com/new"
+
+    @pytest.mark.parametrize("location, expected", [
+        ("login", "https://a.com/app/login"),
+        ("../login", "https://a.com/login"),
+        ("//b.com/x", "https://b.com/x"),
+    ])
+    async def test_relative_location_resolved(self, interceptor, mock_response, location, expected):
+        req_data = {"url": "https://a.com/app/page", "authentication": "unauthenticated"}
+        result = await interceptor.handle_response(
+            req_data, mock_response(302, {"location": location})
+        )
+        assert result["redirect_url"] == expected
+
+    async def test_redirect_url_is_stripped(self, interceptor, mock_response):
+        # Authorization codes, tokens and OAuth parameters ride in a Location's
+        # query and fragment; none of it may reach the stored record.
+        req_data = {"url": "http://a.com", "authentication": "unauthenticated"}
+        result = await interceptor.handle_response(
+            req_data, mock_response(302, {
+                "location": "https://u:pw@app.example.com/cb?code=secret1&state=s#access_token=secret2",
+            })
+        )
+        assert result["redirect_url"] == "https://app.example.com/cb"
+        assert "secret" not in repr(result)
+
+    async def test_302_without_location(self, interceptor, mock_response):
+        req_data = {"url": "http://a.com", "authentication": "unauthenticated"}
+        result = await interceptor.handle_response(req_data, mock_response(302, {}))
+        assert "redirect_url" not in result
+
+    async def test_non_redirect_location_ignored(self, interceptor, mock_response):
+        # A 201's Location names a created resource, not a redirect.
+        req_data = {"url": "http://a.com", "authentication": "unauthenticated"}
+        result = await interceptor.handle_response(
+            req_data, mock_response(201, {"location": "https://a.com/items/1"})
+        )
+        assert "redirect_url" not in result
 
     async def test_none_response(self, interceptor):
         req_data = {"url": "http://a.com", "authentication": "unauthenticated"}
