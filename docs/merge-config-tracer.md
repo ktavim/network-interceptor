@@ -32,8 +32,8 @@ Out of scope for this plan:
 frontend ──► API (network-interceptor/api) ──► 1 scans row + 1 scan_jobs row per scanner
                                                   │
                   ┌───────────────────────────────┴───────────────────────────────┐
-     worker, WORKER_SCANNER=network                                  worker, WORKER_SCANNER=config
-     claims scanner='network' jobs                                   claims scanner='config' jobs
+     worker, WORKER_SCANNER=interceptor                              worker, WORKER_SCANNER=tracer
+     claims scanner='interceptor' jobs                               claims scanner='tracer' jobs
      runs crawler.Mapper                                             runs config_tracer.pipeline.run_scan
                   └──────────────► urls, service_findings, services ◄─────────────┘
                                    (the last job to finish sets the scan's final status)
@@ -43,6 +43,7 @@ frontend ──► API (network-interceptor/api) ──► 1 scans row + 1 scan_
 - Postgres stays the queue. The API never calls a worker; it inserts job rows.
 - config-tracer's engine (crawl, extract, resolve, probe, report) moves in as a library. Its API, database layer, worker and migrations are retired.
 - Both workers use the same image and entry point. `WORKER_SCANNER` picks which jobs a worker claims, so the two can be scaled independently.
+- Naming: `network-interceptor` and `config-tracer` are today's two projects, and the repo keeps the first name. `interceptor` and `tracer` are the two scanners inside the merged service.
 
 Repo layout after the merge:
 
@@ -53,9 +54,9 @@ core/
   enums.py      combined AuthMethod; new Scanner and JobStatus
   jobs.py       NEW: claim, heartbeat, reap and finish on scan_jobs, plus finalize_scan (replaces worker/queue.py)
   merge.py      NEW: combines the scanners' findings into one service verdict
-  translate.py  + config_report_to_rows
-crawler/        network scanner engine, unchanged
-config_tracer/  config scanner engine, moved in (everything outside api/, db/ and worker.py)
+  translate.py  + tracer_report_to_rows
+crawler/        interceptor engine, unchanged
+config_tracer/  tracer engine, moved in (everything outside api/, db/ and worker.py)
 worker/         __main__.py dispatches on WORKER_SCANNER; job.py has one runner per scanner
 ```
 
@@ -71,23 +72,23 @@ worker/         __main__.py dispatches on WORKER_SCANNER; job.py has one runner 
 | `basic` | both | blocker | |
 | `other` | both | blocker | |
 | `negotiate` | both | review | |
-| `unknown` | both | review | network: a tag outside the vocabulary. config: the server answered with something unclassifiable. |
+| `unknown` | both | review | interceptor: a tag outside the vocabulary. tracer: the server answered with something unclassifiable. |
 | `no_response` | both | review | |
-| `dns_failed` | config | review | **New.** network-interceptor reports a DNS failure as `no_response` with `failure_reason = net::ERR_NAME_NOT_RESOLVED`. |
-| `kerberos` | network | cleared | |
+| `dns_failed` | tracer | review | **New.** The interceptor reports a DNS failure as `no_response` with `failure_reason = net::ERR_NAME_NOT_RESOLVED`. |
+| `kerberos` | interceptor | cleared | |
 | `bearer` | both | cleared | |
 | `oauth` | both | cleared | |
-| `login_redirect` | config | cleared | **New.** |
-| `api_key` | network | cleared | |
+| `login_redirect` | tracer | cleared | **New.** |
+| `api_key` | interceptor | cleared | |
 | `unauthenticated` | both | cleared | |
 
-This has to come first. `tag_to_auth_method` maps any value it doesn't know to `unknown`, so without it every `login_redirect` and `dns_failed` from config-tracer would silently become `unknown` with severity review.
+This has to come first. `tag_to_auth_method` maps any value it doesn't know to `unknown`, so without it every `login_redirect` and `dns_failed` from the tracer would silently become `unknown` with severity review.
 
 Because the schema starts fresh, every column that holds one of these vocabularies gets a CHECK constraint listing its values: the auth method, severity, scanner and status columns. This is what config-tracer does today (`native_enum=False, create_constraint=True`). Adding a value then takes a one-line migration.
 
-The constraint only catches values that skip `tag_to_auth_method`, because that function turns any unrecognized tag into `unknown` before it reaches the database. That fallback stays in the network path, where it's deliberate. The config path must convert with `AuthMethod(value)`, which raises on an unknown value, and never go through `tag_to_auth_method`. A value missing from the combined vocabulary then fails loudly instead of becoming `unknown`.
+The constraint only catches values that skip `tag_to_auth_method`, because that function turns any unrecognized tag into `unknown` before it reaches the database. That fallback stays in the interceptor path, where it's deliberate. The tracer path must convert with `AuthMethod(value)`, which raises on an unknown value, and never go through `tag_to_auth_method`. A value missing from the combined vocabulary then fails loudly instead of becoming `unknown`.
 
-New enums: `Scanner` (`network`, `config`) and `JobStatus` (`queued`, `running`, `completed`, `failed`, `cancelled`). `ScanStatus` gains `partial`.
+New enums: `Scanner` (`interceptor`, `tracer`) and `JobStatus` (`queued`, `running`, `completed`, `failed`, `cancelled`). `ScanStatus` gains `partial`.
 
 ### 4.2 Tables
 
@@ -100,7 +101,7 @@ New enums: `Scanner` (`network`, `config`) and `JobStatus` (`queued`, `running`,
 | `id`, `app_id`, `name`, `url`, `started_by`, `started_at`, `completed_at`, `error`, `cancel_requested_at` | As in network-interceptor today |
 | `status` | Derived from the scan's jobs (§4.4). Adds `partial`. |
 
-Compared with today's table, `worker_id`, `heartbeat_at` and `pages_crawled` move to `scan_jobs`, and `max_depth` moves into the network job's `settings`.
+Compared with today's table, `worker_id`, `heartbeat_at` and `pages_crawled` move to `scan_jobs`, and `max_depth` moves into the interceptor job's `settings`.
 
 `cancel_requested_at` stays on `scans` because a cancel applies to the whole scan. Each job's heartbeat reads it.
 
@@ -110,7 +111,7 @@ Compared with today's table, `worker_id`, `heartbeat_at` and `pages_crawled` mov
 |---|---|---|
 | `id` | String PK | Hex UUID, like the other IDs |
 | `scan_id` | FK `scans`, `ON DELETE CASCADE` | |
-| `scanner` | String, CHECK in (`network`, `config`) | |
+| `scanner` | String, CHECK in (`interceptor`, `tracer`) | |
 | `status` | String | `JobStatus` |
 | `settings` | JSONB, NOT NULL | Snapshot taken at request time. Never holds credentials. |
 | `attempts` | Integer, default 0 | |
@@ -123,8 +124,8 @@ Constraints: `UNIQUE (scan_id, scanner)`, and an index on `(scanner, status, cre
 
 Settings snapshots:
 
-- **network:** `{"max_depth": …}` in the first version. The worker still merges it onto `config.json`, as it does today.
-- **config:** `ScanSettings` built from the API's environment and dumped to JSON, as config-tracer does today.
+- **interceptor:** `{"max_depth": …}` in the first version. The worker still merges it onto `config.json`, as it does today.
+- **tracer:** `ScanSettings` built from the API's environment and dumped to JSON, as config-tracer does today.
 
 Login credentials stay in the worker's environment and never go into a snapshot.
 
@@ -156,7 +157,7 @@ The API's `found_by` field lists the scanners that have a row here.
 | Column | Change |
 |---|---|
 | `scanner` | **New**, NOT NULL |
-| `sources` | **New**, TEXT[], default `'{}'`. Filled only by the config scanner, with its provenance strings (`network:`, `js:`, `dom:`, `redirect:`, `synthesized:`). |
+| `sources` | **New**, TEXT[], default `'{}'`. Filled only by the tracer, with its provenance strings (`network:`, `js:`, `dom:`, `redirect:`, `synthesized:`). |
 | Everything else | Unchanged |
 
 How config-tracer's `UrlEvidence` maps onto `urls`:
@@ -179,7 +180,7 @@ How config-tracer's `UrlEvidence` maps onto `urls`:
 
 Each scanner keeps its own per-origin rule. The two orderings disagree in two places, on purpose:
 
-| Value | network-interceptor (`_AUTH_RANK`) | config-tracer (`_VERDICT_PRECEDENCE`) |
+| Value | interceptor (`_AUTH_RANK`) | tracer (`_VERDICT_PRECEDENCE`) |
 |---|---|---|
 | `no_response` | Lowest: any answer beats no answer. Requests the browser aborted (`net::ERR_ABORTED`) are common noise. | Above `unauthenticated`: a probe that timed out is a URL nobody saw, and an open sibling must not hide it. |
 | `unknown` | Above every cleared scheme | Below `bearer`, `oauth` and `login_redirect` |
@@ -190,9 +191,9 @@ To compute a service's combined verdict:
 
 1. **One finding:** that finding is the verdict.
 2. **Two findings:** apply these refinements first.
-   - If one finding is `negotiate` and the other is `kerberos` or `ntlm`, drop the `negotiate`. It's the same SPNEGO challenge; the network scanner saw which mechanism was used, and the anonymous probe can't.
-   - If config says `dns_failed` but the network finding has IPs, drop the `dns_failed`. The lookup worked for the other scanner.
-   - Then take the finding that ranks higher in the order below. On a tie, take the network finding, since observed traffic beats a probe.
+   - If one finding is `negotiate` and the other is `kerberos` or `ntlm`, drop the `negotiate`. It's the same SPNEGO challenge; the interceptor saw which mechanism was used, and the anonymous probe can't.
+   - If the tracer says `dns_failed` but the interceptor finding has IPs, drop the `dns_failed`. The lookup worked for the other scanner.
+   - Then take the finding that ranks higher in the order below. On a tie, take the interceptor finding, since observed traffic beats a probe.
 3. Set `severity = severity_for(verdict)`, and set `evidence_url_id` to the winning finding's evidence.
 
 Cross-scanner order, highest first:
@@ -241,8 +242,8 @@ The lock order stays as `core/events.py` documents it: the scan row first, then 
 
 Runners in `worker/job.py`:
 
-- **network:** today's `run_scan_job`. It writes a finding plus `urls` rows with `scanner='network'`, instead of whole services.
-- **config:** `asyncio.wait_for(config_tracer.pipeline.run_scan([scans.url], ScanSettings(**job.settings)), timeout)`, then `translate.config_report_to_rows`, then the same write path. It emits `auth_detected` per service, as the network crawler does. It keeps config-tracer's hard timeout (900 s). The network runner has no timeout today (D6).
+- **interceptor:** today's `run_scan_job`. It writes a finding plus `urls` rows with `scanner='interceptor'`, instead of whole services.
+- **tracer:** `asyncio.wait_for(config_tracer.pipeline.run_scan([scans.url], ScanSettings(**job.settings)), timeout)`, then `translate.tracer_report_to_rows`, then the same write path. It emits `auth_detected` per service, as the interceptor does. It keeps config-tracer's hard timeout (900 s). The interceptor runner has no timeout today (D6).
 
 Retries: network-interceptor fails a job whose worker vanished, while config-tracer requeued such a job up to 3 attempts. The first version keeps network-interceptor's behavior. The `attempts` column is ready if retries are wanted later (D3).
 
@@ -266,9 +267,9 @@ Everything is additive except the new status value.
 
 | Endpoint | Change |
 |---|---|
-| `POST /api/scans` | Optional `scanners` field (default: both) creates one job per scanner. The response is unchanged. |
+| `POST /api/scans` | Request and response unchanged. Always creates one `scan_jobs` row per scanner. |
 | `GET /api/scans`, `GET /api/apps/{id}/scans` | `status` can be `partial` |
-| `GET /api/scans/{id}` | Adds `jobs: [{scanner, status, started_at, completed_at, error, pages_crawled}]`. Top-level `pages_crawled` is the network job's value. |
+| `GET /api/scans/{id}` | Adds `jobs: [{scanner, status, started_at, completed_at, error, pages_crawled}]`. Top-level `pages_crawled` is the interceptor job's value. |
 | `GET /api/scans/{id}/services` | Each service adds `found_by` and `findings: [{scanner, auth_method, severity, evidence}]` |
 | `GET /api/scans/{id}/services/{sid}/urls` | Each URL adds `scanner` and `sources`. Optional `?scanner=` filter. |
 | `PATCH /api/scans/{id}/services/{sid}` | Unchanged. D4 decides whether `dns_failed` joins `unknown` and `no_response` as values a user can fill in. |
@@ -291,7 +292,7 @@ The old databases are dropped in step 7, and steps 3 and 4 are checked against r
 - Run today's config-tracer on the same target and save `GET /scans/{id}/services` and `/urls`.
 - Don't commit the files, since they name internal hosts.
 
-### Step 1: Bring the config engine in (no behavior change)
+### Step 1: Bring the tracer engine in (no behavior change)
 
 - Copy `config_tracer/` into this repo, minus `api/`, `db/` and `worker.py`. Trim `settings.py` down to `ScanSettings`.
 - Add `aiohttp` to `requirements.txt`, pinned as in config-tracer.
@@ -305,7 +306,7 @@ The old databases are dropped in step 7, and steps 3 and 4 are checked against r
 - `core/merge.py`: the cross-scanner order and the refinements, with unit tests, including the `negotiate`/`kerberos` and `dns_failed`-with-IPs cases.
 - **Done when:** the unit tests pass. No database change is needed.
 
-### Step 3: Fresh database and the job queue (network only)
+### Step 3: Fresh database and the job queue (interceptor only)
 
 The new schema and the code that uses it land together, because today's worker reads `scans.worker_id` and `heartbeat_at`, which the new `scans` table doesn't have.
 
@@ -313,8 +314,8 @@ The new schema and the code that uses it land together, because today's worker r
 - Delete `alembic/versions/*` and write one initial revision that creates the whole schema from §4.2, including the CHECK constraints from §4.1. As network-interceptor's current initial migration does, add the `use_alter` foreign keys (`apps.current_scan_id`, `services.evidence_url_id`, `service_findings.evidence_url_id`) explicitly, because `op.create_table` skips them on PostgreSQL.
 - Update `core/db.py` to match: add `ScanJobRow` and `ServiceFindingRow`, and remove the worker columns from `ScanRow`.
 - `core/jobs.py` replaces `worker/queue.py` and adds `finalize_scan`.
-- `POST /api/scans` creates one network job. Cancel works on jobs.
-- The network runner writes a finding and `urls.scanner`.
+- `POST /api/scans` creates one interceptor job. Cancel works on jobs.
+- The interceptor runner writes a finding and `urls.scanner`.
 - Adopt config-tracer's test-database guard: the suite refuses to run unless the database name ends in `_test`.
 - **Done when:**
   - `alembic upgrade head`, `downgrade base` and `upgrade head` again all run cleanly on the empty database.
@@ -323,17 +324,17 @@ The new schema and the code that uses it land together, because today's worker r
 
 Anyone else with a network-interceptor database, such as a teammate's machine or a shared dev environment, has to drop and recreate it, because the old revisions are gone.
 
-### Step 4: Config worker
+### Step 4: Tracer worker
 
-- Read `WORKER_SCANNER` in `worker/__main__.py`. Add the config runner and `translate.config_report_to_rows`, which applies `strip_url`, resolves `Location`, maps a missing status to 0, and converts verdicts with `AuthMethod(value)` (§4.1).
-- `POST /api/scans` accepts `scanners: ["config"]`.
-- **Done when:**
-  - A config-only scan against config-tracer's fixture servers produces the services that config-tracer's own tests expect.
-  - A config-only scan of the step 0 target matches the config-tracer baseline, apart from URLs that now have their query strings removed.
+- Read `WORKER_SCANNER` in `worker/__main__.py`. Add the tracer runner and `translate.tracer_report_to_rows`, which applies `strip_url`, resolves `Location`, maps a missing status to 0, and converts verdicts with `AuthMethod(value)` (§4.1).
+- `POST /api/scans` creates both jobs.
+- **Done when**, with only a tracer worker running (`WORKER_SCANNER=tracer`), so the interceptor job stays queued and the scan's services come from the tracer alone:
+  - A scan against config-tracer's fixture servers produces the services that config-tracer's own tests expect.
+  - A scan of the step 0 target matches the config-tracer baseline, apart from URLs that now have their query strings removed.
 
 ### Step 5: Both scanners by default
 
-- `POST /api/scans` defaults to both scanners. Turn on merging, `partial`, and the API fields from §6.
+- Run both workers. Turn on merging, `partial`, and the API fields from §6.
 - **Done when:** an integration test runs both runners with stubbed engines (as config-tracer's worker tests do) and checks the merge, `partial`, submit refused on a partial scan, cancel mid-run, and a reaped job finalizing its scan.
 
 ### Step 6: Frontend
@@ -352,9 +353,9 @@ Already decided: the merged service starts on a fresh database, and neither proj
 
 | # | Question | Recommendation |
 |---|---|---|
-| D1 | Should the config crawl reuse the network scanner's login session (`storage_state`)? Without it, on an app behind SSO, config-tracer sees only the login page's bundles. The probes stay anonymous either way. | Yes, after step 5: add a `storage_state` option to `config_tracer.crawl`. |
+| D1 | Should the tracer's crawl reuse the interceptor's login session (`storage_state`)? Without it, on an app behind SSO, the tracer sees only the login page's bundles. The probes stay anonymous either way. | Yes, after step 5: add a `storage_state` option to `config_tracer.crawl`. |
 | D2 | What exposure state does an app get when its latest scan is `partial`? | `failed`, meaning rerun. No new state. |
 | D3 | Retry a job whose worker died? | Not in the first version. The `attempts` column is ready. |
 | D4 | Can a user fill in the auth method of a `dns_failed` service? | Yes, for the same reason `unknown` and `no_response` allow it. |
-| D5 | Is the cross-scanner order in §4.3 right? In particular, config's `no_response` outranks network's `unauthenticated`. | Yes. Review it against real scans during step 5. |
-| D6 | Should network jobs get a hard timeout? | Yes, with the same setting the config runner uses. |
+| D5 | Is the cross-scanner order in §4.3 right? In particular, the tracer's `no_response` outranks the interceptor's `unauthenticated`. | Yes. Review it against real scans during step 5. |
+| D6 | Should interceptor jobs get a hard timeout? | Yes, with the same setting the tracer runner uses. |
