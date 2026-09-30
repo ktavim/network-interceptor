@@ -1,6 +1,6 @@
 # Merging config-tracer into network-interceptor
 
-**Status:** proposal, 2026-09-30. No code has changed yet. The merged service starts on a fresh database; both existing databases hold only dev data and are dropped.
+**Status:** proposal, 2026-09-30, revised 2026-10-01. No code has changed yet. The merged service starts on a fresh database. Both existing databases hold only dev data; they stay in place, untouched, as the record of what today's code produced.
 
 ## 1. Goal
 
@@ -8,7 +8,7 @@ One request (`POST /api/scans`) runs both scanners on the same target. Results l
 
 Out of scope for this plan:
 
-- Carrying over existing data. Both databases hold only dev data, so the merged service starts on a fresh database (§7, step 3).
+- Carrying over existing data. Both databases hold only dev data, so the merged service starts on a fresh database (§7, step 3). The old databases are kept, not migrated.
 - Changing either scanner's detection logic.
 
 ## 2. Starting point
@@ -283,14 +283,14 @@ The frontend has to handle `partial`, and should show `found_by` and each scanne
 
 Each step leaves `main` working and can be tested on its own. The existing Alembic history is replaced by one new initial revision (step 3).
 
-### Step 0: Save a baseline (before any code changes)
+### Step 0: Record a baseline (before any code changes)
 
-The old databases are dropped in step 7, and steps 3 and 4 are checked against results from today's code.
+Steps 3 and 4 are checked against results from today's code. Those results live in the old databases, which stay in place, so the baseline is a set of scan IDs rather than an export.
 
 - Pick a target you know well, ideally one both scanners cover.
-- Run today's network-interceptor on it twice, so you know how much two crawls of the same target normally differ. Save `GET /api/scans/{id}`, `/services` and each service's `/urls` as JSON.
-- Run today's config-tracer on the same target and save `GET /scans/{id}/services` and `/urls`.
-- Don't commit the files, since they name internal hosts.
+- Run today's network-interceptor on it twice, so you know how much two crawls of the same target normally differ. Note both scan IDs.
+- Run today's config-tracer on the same target. Note the scan ID.
+- After step 3, today's network-interceptor API no longer runs, so the comparisons in steps 3 and 4 read the old `services` and `urls` tables directly.
 
 ### Step 1: Bring the tracer engine in (no behavior change)
 
@@ -320,9 +320,9 @@ The new schema and the code that uses it land together, because today's worker r
 - **Done when:**
   - `alembic upgrade head`, `downgrade base` and `upgrade head` again all run cleanly on the empty database.
   - `tests/integration` (`test_queue`, `test_patch_service`) passes after adapting, and `scripts/e2e.py` passes.
-  - A scan of the step 0 target gives the same services as the baseline, allowing for the normal difference between two crawls.
+  - A scan of the step 0 target gives the same services as the baseline scans in the old `network-interceptor` database, allowing for the normal difference between two crawls.
 
-Anyone else with a network-interceptor database, such as a teammate's machine or a shared dev environment, has to drop and recreate it, because the old revisions are gone.
+Anyone else running network-interceptor, such as a teammate's machine or a shared dev environment, has to create their own `f35` database and repoint `DATABASE_URL`. Their old database can stay. The new code fails loudly if it's pointed at one: Alembic stops on a revision it doesn't know, and the app can't find `scan_jobs`.
 
 ### Step 4: Tracer worker
 
@@ -330,7 +330,7 @@ Anyone else with a network-interceptor database, such as a teammate's machine or
 - `POST /api/scans` creates both jobs.
 - **Done when**, with only a tracer worker running (`WORKER_SCANNER=tracer`), so the interceptor job stays queued and the scan's services come from the tracer alone:
   - A scan against config-tracer's fixture servers produces the services that config-tracer's own tests expect.
-  - A scan of the step 0 target matches the config-tracer baseline, apart from URLs that now have their query strings removed.
+  - A scan of the step 0 target matches the baseline scan in the old `config_tracer_api` database, apart from URLs that now have their query strings removed.
 
 ### Step 5: Both scanners by default
 
@@ -341,15 +341,15 @@ Anyone else with a network-interceptor database, such as a teammate's machine or
 
 - Show the `partial` state, job progress, `found_by`, each scanner's findings, and the new URL fields `scanner` and `sources`.
 
-### Step 7: Retire config-tracer and the old databases
+### Step 7: Retire config-tracer
 
 - Stop config-tracer's API and worker, and remove the project.
-- Drop `config_tracer_api`, `network-interceptor` and `network-interceptor-test`, plus `config_tracer_api_test` if you created one.
-- Delete the step 0 baseline files.
+- `config_tracer_api` and `network-interceptor` stay as they are. They're the only record of what today's code decided for each origin, they cost nothing, and the new code can't run against them (step 3). Drop them whenever nobody needs the comparison anymore.
+- The test databases, `network-interceptor-test` and `config_tracer_api_test` if you created one, hold nothing. Drop them.
 
 ## 8. Open decisions
 
-Already decided: the merged service starts on a fresh database, and neither project's data is carried over (2026-09-30).
+Already decided: the merged service starts on a fresh database, and neither project's data is carried over (2026-09-30). The old databases are kept rather than dropped, so the baseline stays queryable (2026-10-01).
 
 | # | Question | Recommendation |
 |---|---|---|
