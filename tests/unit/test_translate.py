@@ -35,7 +35,6 @@ class TestSeverityFor:
             AuthMethod.kerberos,
             AuthMethod.oauth,
             AuthMethod.bearer,
-            AuthMethod.mtls,
             AuthMethod.unauthenticated,
         ],
     )

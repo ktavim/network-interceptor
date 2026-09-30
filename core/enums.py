@@ -9,7 +9,6 @@ class AuthMethod(str, Enum):
     basic = "basic"
     bearer = "bearer"
     api_key = "api_key"
-    mtls = "mtls"
     other = "other"
     unauthenticated = "unauthenticated"
     no_response = "no_response"
