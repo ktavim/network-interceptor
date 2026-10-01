@@ -72,7 +72,7 @@ worker/         __main__.py dispatches on WORKER_SCANNER; job.py has one runner 
 | `basic` | both | blocker | |
 | `other` | both | blocker | |
 | `negotiate` | both | review | |
-| `unknown` | both | review | interceptor: a tag outside the vocabulary. tracer: the server answered with something unclassifiable. |
+| `unknown` | tracer (interceptor: in theory only) | review | tracer: a bare 401, a coarse 4xx (400, 403, 404, 407) or a 5xx. interceptor: a tag outside the vocabulary, which no producer emits (`test_rank_table_has_no_tags_the_crawler_cannot_emit`), so in practice every `unknown` the merge sees is the tracer's. |
 | `no_response` | both | review | |
 | `dns_failed` | tracer | review | **New.** The interceptor reports a DNS failure as `no_response` with `failure_reason = net::ERR_NAME_NOT_RESOLVED`. |
 | `kerberos` | interceptor | cleared | |
@@ -183,7 +183,7 @@ Each scanner keeps its own per-origin rule. The two orderings disagree in two pl
 | Value | interceptor (`_AUTH_RANK`) | tracer (`_VERDICT_PRECEDENCE`) |
 |---|---|---|
 | `no_response` | Lowest: any answer beats no answer. Requests the browser aborted (`net::ERR_ABORTED`) are common noise. | Above `unauthenticated`: a probe that timed out is a URL nobody saw, and an open sibling must not hide it. |
-| `unknown` | Above every cleared scheme | Below `bearer`, `oauth` and `login_redirect` |
+| `unknown` | Above every cleared scheme. Moot in practice: the interceptor never emits it (§4.1). | Below `bearer`, `oauth` and `login_redirect`: a concrete scheme on the host beats a 404 or a bare 401. |
 
 Each choice is right for the scanner that makes it, so neither ordering changes. The merge only combines the two scanners' findings for an origin.
 
@@ -193,14 +193,21 @@ To compute a service's combined verdict:
 2. **Two findings:** apply these refinements first.
    - If one finding is `negotiate` and the other is `kerberos` or `ntlm`, drop the `negotiate`. It's the same SPNEGO challenge; the interceptor saw which mechanism was used, and the anonymous probe can't.
    - If the tracer says `dns_failed` but the interceptor finding has IPs, drop the `dns_failed`. The lookup worked for the other scanner.
+   - If the interceptor says `no_response` and the tracer says anything but `no_response` or `dns_failed`, drop the interceptor finding. The interceptor's per-origin `no_response` means every browser request to the origin failed, usually `net::ERR_ABORTED` from a cancelled navigation or a prefetch, and the tracer's answer shows the origin is reachable.
    - Then take the finding that ranks higher in the order below. On a tie, take the interceptor finding, since observed traffic beats a probe.
 3. Set `severity = severity_for(verdict)`, and set `evidence_url_id` to the winning finding's evidence.
 
 Cross-scanner order, highest first:
 
-`ntlm` > `basic` > `other` > `negotiate` > `unknown` > `no_response` > `dns_failed` > `kerberos` > `bearer` > `oauth` > `login_redirect` > `api_key` > `unauthenticated`
+`ntlm` > `basic` > `other` > `negotiate` > `kerberos` > `bearer` > `oauth` > `login_redirect` > `api_key` > `unknown` > `no_response` > `dns_failed` > `unauthenticated`
 
-Every blocker ranks above every review value, and every review value above every cleared one. So the combined severity is never lower than either finding's.
+Why this order (D4):
+
+- A blocker always wins, and `negotiate` stays above every cleared scheme, because a SPNEGO challenge may be NTLM underneath.
+- A concrete scheme beats a non-answer (`unknown`, `no_response`, `dns_failed`). Both scanners' own rules say so: the tracer collapses `{bearer, unknown}` to `bearer`, and the interceptor ranks `no_response` below everything. After the refinements, every non-answer that reaches this comparison is the tracer's, and the tracer's `unknown` is a 404, a bare 401 or a 5xx (§4.1), which can't hide NTLM or Basic: those schemes announce themselves in the challenge, and the tracer classifies them from it. The order the plan first had, with the non-answers above the cleared schemes, would have put every app with a token API on `unknown`/review: the tracer HEADs the API base named in the config and gets a 404 or a bare 401, while the interceptor watched the browser use a bearer token.
+- A non-answer beats `unauthenticated`, as the tracer's rule says: a probed URL that answered nothing recognizable must not be hidden by open siblings. The cost is a review the reviewer can clear in seconds from `findings` (§6).
+
+So the combined severity can be lower than one finding's, in exactly one case: a non-answer from one scanner meets a concrete cleared scheme from the other. The finding stays visible under `findings`.
 
 `core/merge.py` is a pure function: findings in, verdict out. It runs every time a job finishes, over all of the scan's services, so one scanner's results show up while the other is still running. It never runs after the scan's final status is set, so it can't overwrite a manual auth fix; PATCH works only on completed scans.
 
@@ -243,9 +250,11 @@ The lock order stays as `core/events.py` documents it: the scan row first, then 
 Runners in `worker/job.py`:
 
 - **interceptor:** today's `run_scan_job`. It writes a finding plus `urls` rows with `scanner='interceptor'`, instead of whole services.
-- **tracer:** `asyncio.wait_for(config_tracer.pipeline.run_scan([scans.url], ScanSettings(**job.settings)), timeout)`, then `translate.tracer_report_to_rows`, then the same write path. It emits `auth_detected` per service, as the interceptor does. It keeps config-tracer's hard timeout (900 s). The interceptor runner has no timeout today (D5).
+- **tracer:** `config_tracer.pipeline.run_scan([scans.url], ScanSettings(**job.settings))`, then `translate.tracer_report_to_rows`, then the same write path. It emits `auth_detected` per service, as the interceptor does.
 
-Retries: network-interceptor fails a job whose worker vanished, while config-tracer requeued such a job up to 3 attempts. The first version keeps network-interceptor's behavior. The `attempts` column is ready if retries are wanted later (D2).
+Both runners run their engine inside `asyncio.timeout(SCAN_TIMEOUT_S)` (D5). On expiry the job is `failed` with `TimeoutError: scan exceeded SCAN_TIMEOUT_S=…`, the engine's cleanup still runs, and the scan ends `partial` if the other job completed. `SCAN_TIMEOUT_S` comes from the worker process's environment, so each deployment sets its own, which is one value per scanner. The tracer keeps config-tracer's 900 s. The interceptor's default is set from the step 0 baseline crawls, at several times the longer one, because a depth-3 crawl with 20 clicks per page legitimately runs far longer than the tracer's one-page crawl. The lease needs no `stale > timeout` rule like config-tracer's: staleness here is heartbeat based and doesn't depend on how long a job runs.
+
+Retries: none in the first version (D2). A job whose worker stops heartbeating is failed by the reaper, and a job interrupted by a worker shutdown is failed with `worker shut down`, as network-interceptor does today. This is a known regression for the tracer: config-tracer hands a job back to the queue on shutdown. `claim_next` increments `attempts`, so the column is truthful from day one and ready for retries later.
 
 Events:
 
@@ -272,7 +281,7 @@ Everything is additive except the new status value.
 | `GET /api/scans/{id}` | Adds `jobs: [{scanner, status, started_at, completed_at, error, pages_crawled}]`. Top-level `pages_crawled` is the interceptor job's value. |
 | `GET /api/scans/{id}/services` | Each service adds `found_by` and `findings: [{scanner, auth_method, severity, evidence}]` |
 | `GET /api/scans/{id}/services/{sid}/urls` | Each URL adds `scanner` and `sources`. Optional `?scanner=` filter. |
-| `PATCH /api/scans/{id}/services/{sid}` | Unchanged. D3 decides whether `dns_failed` joins `unknown` and `no_response` as values a user can fill in. |
+| `PATCH /api/scans/{id}/services/{sid}` | `dns_failed` joins `unknown` and `no_response` as values a user can fill in, and as values nobody can set (D3). Otherwise unchanged. |
 | `POST /api/scans/{id}/cancel` | Cancels queued jobs directly and flags running ones, then calls `finalize_scan` if every job has finished |
 | `GET /api/apps/{id}/diff` | Unchanged; it keys on origin. `found_by` changes could be added later. |
 | SSE | New event types (§5) |
@@ -288,7 +297,7 @@ Each step leaves `main` working and can be tested on its own. The existing Alemb
 Steps 3 and 4 are checked against results from today's code. Those results live in the old databases, which stay in place, so the baseline is a set of scan IDs rather than an export.
 
 - Pick a target you know well, ideally one both scanners cover.
-- Run today's network-interceptor on it twice, so you know how much two crawls of the same target normally differ. Note both scan IDs.
+- Run today's network-interceptor on it twice, so you know how much two crawls of the same target normally differ. Note both scan IDs and how long each took (`completed_at - started_at`); the interceptor's `SCAN_TIMEOUT_S` default comes from these (D5).
 - Run today's config-tracer on the same target. Note the scan ID.
 - After step 3, today's network-interceptor API no longer runs, so the comparisons in steps 3 and 4 read the old `services` and `urls` tables directly.
 
@@ -303,7 +312,7 @@ Steps 3 and 4 are checked against results from today's code. Those results live 
 
 - `core/enums.py`: add `login_redirect` and `dns_failed`, plus `Scanner` and `JobStatus`. `api/models.py`: add `partial` to `ScanStatus`.
 - `core/translate.py`: extend `severity_for` to the new values.
-- `core/merge.py`: the cross-scanner order and the refinements, with unit tests, including the `negotiate`/`kerberos` and `dns_failed`-with-IPs cases.
+- `core/merge.py`: the cross-scanner order and the refinements, with unit tests, including the `negotiate`/`kerberos`, `dns_failed`-with-IPs and interceptor-`no_response`-with-tracer-answer cases, and the token-API case (`bearer` + `unknown` → `bearer`).
 - **Done when:** the unit tests pass. No database change is needed.
 
 ### Step 3: Fresh database and the job queue (interceptor only)
@@ -327,6 +336,7 @@ Anyone else running network-interceptor, such as a teammate's machine or a share
 ### Step 4: Tracer worker
 
 - Read `WORKER_SCANNER` in `worker/__main__.py`. Add the tracer runner and `translate.tracer_report_to_rows`, which applies `strip_url`, resolves `Location`, maps a missing status to 0, and converts verdicts with `AuthMethod(value)` (§4.1).
+- Add the `SCAN_TIMEOUT_S` wrapper to both runners (§5, D5), with a unit test that stubs an engine that never returns.
 - `POST /api/scans` creates both jobs.
 - **Done when**, with only a tracer worker running (`WORKER_SCANNER=tracer`), so the interceptor job stays queued and the scan's services come from the tracer alone:
   - A scan against config-tracer's fixture servers produces the services that config-tracer's own tests expect.
@@ -334,8 +344,10 @@ Anyone else running network-interceptor, such as a teammate's machine or a share
 
 ### Step 5: Both scanners by default
 
-- Run both workers. Turn on merging, `partial`, and the API fields from §6.
-- **Done when:** an integration test runs both runners with stubbed engines (as config-tracer's worker tests do) and checks the merge, `partial`, submit refused on a partial scan, cancel mid-run, and a reaped job finalizing its scan.
+- Run both workers. Turn on merging, `partial`, and the API fields from §6. `derive_exposure_state` adds `partial` to the statuses it maps to `failed` (D1).
+- **Done when:**
+  - An integration test runs both runners with stubbed engines (as config-tracer's worker tests do) and checks the merge, `partial`, submit refused on a partial scan, cancel mid-run, and a reaped job finalizing its scan.
+  - On the step 0 target, every service whose combined verdict differs from the interceptor's finding has been read and makes sense (D4). This is the check of the cross-scanner order against real scans.
 
 ### Step 6: Frontend
 
@@ -347,14 +359,14 @@ Anyone else running network-interceptor, such as a teammate's machine or a share
 - `config_tracer_api` and `network-interceptor` stay as they are. They're the only record of what today's code decided for each origin, they cost nothing, and the new code can't run against them (step 3). Drop them whenever nobody needs the comparison anymore.
 - The test databases, `network-interceptor-test` and `config_tracer_api_test` if you created one, hold nothing. Drop them.
 
-## 8. Open decisions
+## 8. Decisions
 
-Already decided: the merged service starts on a fresh database, and neither project's data is carried over (2026-09-30). The old databases are kept rather than dropped, so the baseline stays queryable (2026-10-01).
+None open. Decided:
 
-| # | Question | Recommendation |
-|---|---|---|
-| D1 | What exposure state does an app get when its latest scan is `partial`? | `failed`, meaning rerun. No new state. |
-| D2 | Retry a job whose worker died? | Not in the first version. The `attempts` column is ready. |
-| D3 | Can a user fill in the auth method of a `dns_failed` service? | Yes, for the same reason `unknown` and `no_response` allow it. |
-| D4 | Is the cross-scanner order in §4.3 right? In particular, the tracer's `no_response` outranks the interceptor's `unauthenticated`. | Yes. Review it against real scans during step 5. |
-| D5 | Should interceptor jobs get a hard timeout? | Yes, with the same setting the tracer runner uses. |
+- The merged service starts on a fresh database, and neither project's data is carried over (2026-09-30).
+- The old databases are kept rather than dropped, so the baseline stays queryable (2026-10-01).
+- **D1:** An app whose latest scan is `partial` gets exposure state `failed`, meaning rerun. No new state. A partial scan supports no other action, because submit and the manual auth fix both go through `_latest_completed_scan_id`, and `last_scan_status` carries `partial` so the frontend can still label the card. One line in `derive_exposure_state` (2026-10-01).
+- **D2:** No retries in the first version, to keep the merge small. Two follow-ups, in this order, once step 5 is done. First, requeue on graceful shutdown: `_record_interrupted(SHUTDOWN)` calls `release` instead of `record_failure`; the job keeps its `created_at`, so it returns to the front of the queue, and `scans.status` stays `running`. Second, requeue from the reaper, which needs an attempt cap and a sweep that fails capped-out rows. Don't copy config-tracer's shape there: a shutdown requeue of a row at `attempts == max` leaves it `pending` forever, because claim filters `attempts < max` and `recover_stale` only touches `running` rows (2026-10-01).
+- **D3:** A user can fill in the auth method of a `dns_failed` service, and can't set a service to `dns_failed`. The rule behind `_FILL_IN_AUTH_METHODS` is that a manual value may replace only what the scanner couldn't tell, and `dns_failed` is that: the origin is named in a config or bundle and nobody resolved the host. Without the fill-in, the only resolution would be `excluded`, which is wrong for a host the owner knows is NTLM. `dns_failed` joins the tuple, the 409 message names it, and `test_patch_service` gets a case (2026-10-01).
+- **D4:** The cross-scanner order is the one in §4.3, revised from the first draft: the non-answers (`unknown`, `no_response`, `dns_failed`) moved below the concrete cleared schemes and stay above `unauthenticated`. The first draft would have put every app with a token API on `unknown`/review. The tracer's `no_response` still outranks the interceptor's `unauthenticated`. A third refinement drops an interceptor `no_response` when the tracer got an answer. Step 5 checks the order against the step 0 target (2026-10-01).
+- **D5:** Both runners get a hard timeout, `asyncio.timeout(SCAN_TIMEOUT_S)`, read from each worker process's environment, so one value per scanner. Same mechanism, not the same value: the tracer's 900 s was sized for a one-page crawl, and a depth-3 interceptor crawl runs far longer legitimately. The interceptor's default is set from the step 0 baseline durations. Without it a hung crawl holds a slot and keeps its scan `running` until someone cancels; with `CRAWLER_MAX_PARALLEL=2`, two of those stall the queue. No `stale > timeout` rule is needed, because the lease is heartbeat based (2026-10-01).
