@@ -252,7 +252,7 @@ Runners in `worker/job.py`:
 - **interceptor:** today's `run_scan_job`. It writes a finding plus `urls` rows with `scanner='interceptor'`, instead of whole services.
 - **tracer:** `config_tracer.pipeline.run_scan([scans.url], ScanSettings(**job.settings))`, then `translate.tracer_report_to_rows`, then the same write path. It emits `auth_detected` per service, as the interceptor does.
 
-Both runners run their engine inside `asyncio.timeout(SCAN_TIMEOUT_S)` (D5). On expiry the job is `failed` with `TimeoutError: scan exceeded SCAN_TIMEOUT_S=…`, the engine's cleanup still runs, and the scan ends `partial` if the other job completed. `SCAN_TIMEOUT_S` comes from the worker process's environment, so each deployment sets its own, which is one value per scanner. The tracer keeps config-tracer's 900 s. The interceptor's default is set from the step 0 baseline crawls, at several times the longer one, because a depth-3 crawl with 20 clicks per page legitimately runs far longer than the tracer's one-page crawl. The lease needs no `stale > timeout` rule like config-tracer's: staleness here is heartbeat based and doesn't depend on how long a job runs.
+Both runners run their engine inside `asyncio.timeout(SCAN_TIMEOUT_S)` (D5). On expiry the job is `failed` with `TimeoutError: scan exceeded SCAN_TIMEOUT_S=…`, the engine's cleanup still runs, and the scan ends `partial` if the other job completed. `SCAN_TIMEOUT_S` comes from the worker process's environment, so each deployment sets its own, which is one value per scanner. The tracer keeps config-tracer's 900 s. The interceptor's default is 3600 s, a bit over four times the longer step 0 baseline crawl (13:54), because a depth-3 crawl with 20 clicks per page legitimately runs far longer than the tracer's one-page crawl. The lease needs no `stale > timeout` rule like config-tracer's: staleness here is heartbeat based and doesn't depend on how long a job runs.
 
 Retries: none in the first version (D2). A job whose worker stops heartbeating is failed by the reaper, and a job interrupted by a worker shutdown is failed with `worker shut down`, as network-interceptor does today. This is a known regression for the tracer: config-tracer hands a job back to the queue on shutdown. `claim_next` increments `attempts`, so the column is truthful from day one and ready for retries later.
 
@@ -292,13 +292,25 @@ The frontend has to handle `partial`, and should show `found_by` and each scanne
 
 Each step leaves `main` working and can be tested on its own. The existing Alembic history is replaced by one new initial revision (step 3).
 
-### Step 0: Record a baseline (before any code changes)
+### Step 0: Baseline (recorded before any code changes)
 
-Steps 3 and 4 are checked against results from today's code. Those results live in the old databases, which stay in place, so the baseline is a set of scan IDs rather than an export.
+Steps 3 and 4 are checked against results from today's code. Those results live in the old databases, which stay in place, so the baseline is a set of scan IDs.
 
-- Pick a target you know well, ideally one both scanners cover.
-- Run today's network-interceptor on it twice, so you know how much two crawls of the same target normally differ. Note both scan IDs and how long each took (`completed_at - started_at`); the interceptor's `SCAN_TIMEOUT_S` default comes from these (D5).
-- Run today's config-tracer on the same target. Note the scan ID.
+Recorded 2026-10-01, with code at `da05d49` (network-interceptor) and `fa2da7d` (config-tracer):
+
+- Target: `https://practicesoftwaretesting.com`, which both scanners cover.
+- Today's network-interceptor ran on it twice, to show how much two crawls of the same target normally differ. The longer duration sets the interceptor's `SCAN_TIMEOUT_S` default (D5).
+- Today's config-tracer ran on it once.
+
+| Scanner | Scan ID | Settings | Duration | Pages | Services | URLs |
+|---|---|---|---|---|---|---|
+| interceptor | `b0d3bb9ce9d343d7999331c5dcffaaf1` | `max_depth` omitted (3 from `config.json`) | 13:54 | 7 | 19 | 531 |
+| interceptor | `54893a4211d846edbb731f281ac8f50d` | same | 8:35 | 6 | 18 | 459 |
+| tracer | `b65cef5d-dffe-46f4-8a5a-d13415f7bf7b` | `max_pages=1`, `follow_links=false` | 0:39 | | 14 | 44 |
+
+- Normal difference between the two crawls: 18 origins in common, all with the same verdict. One origin (`www.google.com`, one request) is in the first crawl only. Request counts differ on three origins (`api.practicesoftwaretesting.com`, `unsplash.com`, `www.google-analytics.com`).
+- Neither crawl was logged in, so every interceptor service is `unauthenticated`. On this target the step 5 check sees only one cross-scanner rule, a non-answer beating `unauthenticated`; the other rules rest on the step 2 unit tests.
+- The step 3 comparison scan must also omit `max_depth`.
 - After step 3, today's network-interceptor API no longer runs, so the comparisons in steps 3 and 4 read the old `services` and `urls` tables directly.
 
 ### Step 1: Bring the tracer engine in (no behavior change)
@@ -369,4 +381,4 @@ None open. Decided:
 - **D2:** No retries in the first version, to keep the merge small. Two follow-ups, in this order, once step 5 is done. First, requeue on graceful shutdown: `_record_interrupted(SHUTDOWN)` calls `release` instead of `record_failure`; the job keeps its `created_at`, so it returns to the front of the queue, and `scans.status` stays `running`. Second, requeue from the reaper, which needs an attempt cap and a sweep that fails capped-out rows. Don't copy config-tracer's shape there: a shutdown requeue of a row at `attempts == max` leaves it `pending` forever, because claim filters `attempts < max` and `recover_stale` only touches `running` rows (2026-10-01).
 - **D3:** A user can fill in the auth method of a `dns_failed` service, and can't set a service to `dns_failed`. The rule behind `_FILL_IN_AUTH_METHODS` is that a manual value may replace only what the scanner couldn't tell, and `dns_failed` is that: the origin is named in a config or bundle and nobody resolved the host. Without the fill-in, the only resolution would be `excluded`, which is wrong for a host the owner knows is NTLM. `dns_failed` joins the tuple, the 409 message names it, and `test_patch_service` gets a case (2026-10-01).
 - **D4:** The cross-scanner order is the one in §4.3, revised from the first draft: the non-answers (`unknown`, `no_response`, `dns_failed`) moved below the concrete cleared schemes and stay above `unauthenticated`. The first draft would have put every app with a token API on `unknown`/review. The tracer's `no_response` still outranks the interceptor's `unauthenticated`. A third refinement drops an interceptor `no_response` when the tracer got an answer. Step 5 checks the order against the step 0 target (2026-10-01).
-- **D5:** Both runners get a hard timeout, `asyncio.timeout(SCAN_TIMEOUT_S)`, read from each worker process's environment, so one value per scanner. Same mechanism, not the same value: the tracer's 900 s was sized for a one-page crawl, and a depth-3 interceptor crawl runs far longer legitimately. The interceptor's default is set from the step 0 baseline durations. Without it a hung crawl holds a slot and keeps its scan `running` until someone cancels; with `CRAWLER_MAX_PARALLEL=2`, two of those stall the queue. No `stale > timeout` rule is needed, because the lease is heartbeat based (2026-10-01).
+- **D5:** Both runners get a hard timeout, `asyncio.timeout(SCAN_TIMEOUT_S)`, read from each worker process's environment, so one value per scanner. Same mechanism, not the same value: the tracer's 900 s was sized for a one-page crawl, and a depth-3 interceptor crawl runs far longer legitimately. The interceptor's default is 3600 s, a bit over four times the longer step 0 baseline crawl (13:54; the other took 8:35). Without it a hung crawl holds a slot and keeps its scan `running` until someone cancels; with `CRAWLER_MAX_PARALLEL=2`, two of those stall the queue. No `stale > timeout` rule is needed, because the lease is heartbeat based (2026-10-01).
