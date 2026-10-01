@@ -7,6 +7,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from config_tracer.settings import ScanSettings
 from core.db import make_engine, make_session_factory
 
 from .routes_apps import router as apps_router
@@ -27,6 +28,10 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # The tracer's tuning, read from the environment once; each scan's tracer
+    # job gets a snapshot of it. A bad value stops the API here, not a scan later.
+    app.state.tracer_settings = ScanSettings.from_env()
+
     engine = make_engine()
     session_factory = make_session_factory(engine)
     app.state.engine = engine

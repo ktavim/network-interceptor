@@ -1,6 +1,6 @@
 # Merging config-tracer into network-interceptor
 
-**Status:** proposal, 2026-09-30, revised 2026-10-01. Steps 1 to 3 (§7) are done, 2026-10-01; no later step has started. The merged service runs on a fresh database, `f35`; the step 3 comparison scan there is `cd26d91452d74820ac5edb6f78cdd5c6`. Both existing databases hold only dev data; they stay in place, untouched, as the record of what today's code produced.
+**Status:** proposal, 2026-09-30, revised 2026-10-01. Steps 1 to 3 (§7) are done, 2026-10-01, and step 4, 2026-10-02; no later step has started. The merged service runs on a fresh database, `f35`; the step 3 comparison scan there is `cd26d91452d74820ac5edb6f78cdd5c6` and the step 4 one is `f57ef053196e4eb1b3859592f5c72b8e`. Both existing databases hold only dev data; they stay in place, untouched, as the record of what today's code produced.
 
 ## 1. Goal
 
@@ -170,11 +170,11 @@ How config-tracer's `UrlEvidence` maps onto `urls`:
 | `failure_reason` | `error` | |
 | `auth_method` | `detected_method` | |
 | `auth_challenge` | `www_authenticate` | |
-| `redirect_url` | `location`, resolved against `url`, then passed through `strip_url` | network-interceptor stores it resolved and stripped. config-tracer stores it raw, and it's often relative. |
+| `redirect_url` | `location` of a 3xx, resolved against `url`, then passed through `strip_url`; NULL for any other status | network-interceptor stores it resolved and stripped, and only for a redirect. config-tracer stores it raw, and it's often relative. |
 | `resource_type` | `'probe'` | Lets the UI tell a probe apart from a captured request |
 | `page_url` | `''` | The provenance is in `sources` |
 | `sent_auth_scheme` | NULL | The probes are anonymous |
-| `sources` | `sources` | |
+| `sources` | `sources`, with the URL after `network:`, `js:`, `redirect:` and `synthesized:` passed through `strip_url` | Those four name a URL, and `redirect:` and `synthesized:` repeat a probed one, so they can carry the query string that `url` just lost. `dom:` names a page element and is kept as is. |
 
 ### 4.3 Merge rules
 
@@ -354,6 +354,14 @@ Anyone else running network-interceptor, such as a teammate's machine or a share
 - **Done when**, with only a tracer worker running (`WORKER_SCANNER=tracer`), so the interceptor job stays queued and the scan's services come from the tracer alone:
   - A scan against config-tracer's fixture servers produces the services that config-tracer's own tests expect.
   - A scan of the step 0 target matches the baseline scan in the old `config_tracer_api` database, apart from URLs that now have their query strings removed.
+
+Recorded 2026-10-02:
+
+- `WORKER_SCANNER` is required. A worker started without it, or with any value but `interceptor` or `tracer`, exits with a message; it doesn't default to one scanner.
+- From this step a scan ends only when a worker of each scanner has run its job. `scripts/e2e.py` starts both kinds.
+- The fixture-server check is `tests/integration/test_tracer_scan.py`.
+- The step 0 target check is scan `f57ef053196e4eb1b3859592f5c72b8e`: 14 services and 44 URLs, as in the baseline, with the same verdict, addresses and evidence URL for every service and the same method, status, verdict, challenge, redirect target and sources for every URL. Three baseline URLs are stored shorter, each having lost a fragment (`#…`), which `strip_url` drops along with the query string. The tracer job took 0:57.
+- That scan was cancelled after the comparison, so its queued interceptor job never ran and its services stay the tracer's alone. Its status is `cancelled`.
 
 ### Step 5: Both scanners by default
 

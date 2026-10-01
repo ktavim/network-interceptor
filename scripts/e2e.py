@@ -1,4 +1,4 @@
-"""End-to-end smoke test: the real API, workers and Chromium against a local test site.
+"""End-to-end smoke test: the real API, workers of both scanners and Chromium against a local test site.
 
     TEST_DATABASE_URL=postgresql+asyncpg://... python scripts/e2e.py [--slow]
 
@@ -27,6 +27,7 @@ WINDOWS = sys.platform == "win32"
 API = "http://127.0.0.1:8811"
 SITE = "http://127.0.0.1:8801"
 TERMINAL = ("scan_completed", "scan_failed")
+ENDED = {"completed", "partial", "failed", "cancelled"}
 
 results = []
 
@@ -38,9 +39,12 @@ def check(name, ok, detail=""):
 
 # ---------------------------------------------------------------- test site
 
+# The browser calls 8802 and 8803, which is what the interceptor sees. The config names 8803
+# again and 8804, which no page calls: only the tracer, reading the config, finds that one.
 EXTERNALS = (
     '<img src="http://127.0.0.1:8802/p.png">'
     '<script>fetch("http://127.0.0.1:8803/api").catch(() => {})</script>'
+    '<script>window.__CONFIG__ = {"api": "http://127.0.0.1:8803/api", "docs": "http://127.0.0.1:8804/docs"};</script>'
 )
 
 
@@ -72,12 +76,17 @@ async def _basic_api(_):
     return web.Response(status=401, headers={"WWW-Authenticate": 'Basic realm="t"', "Access-Control-Allow-Origin": "*"})
 
 
+async def _docs(_):
+    return web.Response(text="docs")
+
+
 async def start_site():
     runners = []
     for port, routes in (
         (8801, [web.get("/fast", _fast), web.get("/slow", _slow), web.get("/slow/{n}", _slow_sub)]),
         (8802, [web.get("/p.png", _pixel)]),
         (8803, [web.get("/api", _basic_api)]),
+        (8804, [web.get("/docs", _docs)]),
     ):
         app = web.Application()
         app.add_routes(routes)
@@ -120,7 +129,7 @@ def headless_shells():
 
 def ports_in_use():
     busy = []
-    for port in (8801, 8802, 8803, 8811):
+    for port in (8801, 8802, 8803, 8804, 8811):
         with socket.socket() as s:
             if not WINDOWS:
                 s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)  # ignore TIME_WAIT, not listeners
@@ -203,7 +212,7 @@ class Harness:
             await asyncio.sleep(0.3)
         raise RuntimeError("the API did not come up")
 
-    def start_worker(self, name, max_parallel):
+    def start_worker(self, name, max_parallel, scanner="interceptor"):
         kwargs = dict(start_new_session=True)
         if WINDOWS:
             # Its own hidden console, so a Ctrl+C can reach it the way a terminal's would.
@@ -212,7 +221,8 @@ class Harness:
             si.wShowWindow = subprocess.SW_HIDE
             kwargs = dict(creationflags=subprocess.CREATE_NEW_CONSOLE, startupinfo=si)
         proc = subprocess.Popen(
-            [sys.executable, "-m", "worker"], env=self.env(CRAWLER_MAX_PARALLEL=max_parallel), cwd=REPO,
+            [sys.executable, "-m", "worker"],
+            env=self.env(WORKER_SCANNER=scanner, CRAWLER_MAX_PARALLEL=max_parallel), cwd=REPO,
             stdout=self._log(f"worker_{name}"), stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, **kwargs,
         )
         self.workers[name] = proc
@@ -248,6 +258,15 @@ class Harness:
         finally:
             await conn.close()
 
+    async def jobs(self, scan_id):
+        """{scanner: (status, error)} for the scan's jobs."""
+        conn = await asyncpg.connect(self.pg_dsn)
+        try:
+            rows = await conn.fetch("SELECT scanner, status, error FROM scan_jobs WHERE scan_id=$1", scan_id)
+            return {r["scanner"]: (r["status"], r["error"]) for r in rows}
+        finally:
+            await conn.close()
+
     async def events(self, scan_id):
         conn = await asyncpg.connect(self.pg_dsn)
         try:
@@ -266,7 +285,7 @@ class Harness:
         return await self.scan(scan_id)
 
     async def wait_running(self, scan_id):
-        """Until a worker has claimed the scan and visited its first page."""
+        """Until the interceptor worker has claimed the scan's job and visited its first page."""
         await self.wait_status(scan_id, {"running"}, 15)
         deadline = time.monotonic() + 30
         while time.monotonic() < deadline:
@@ -274,6 +293,15 @@ class Harness:
                 return await self.scan(scan_id)
             await asyncio.sleep(0.25)
         return await self.scan(scan_id)
+
+    async def wait_job_claimed(self, scan_id, scanner, timeout=15):
+        """Until that scanner's worker has claimed the scan's job. Returns the job's status."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if (await self.jobs(scan_id))[scanner][0] != "queued":
+                break
+            await asyncio.sleep(0.25)
+        return (await self.jobs(scan_id))[scanner][0]
 
 
 async def check_no_chromium_left(name, baseline):
@@ -349,11 +377,15 @@ async def happy_path(h, http, fast_app):
     check("worker events reach the API", {"page_visited", "blocker_found"} <= set(types))
     row = await h.scan(scan_id)
     check("scan completed by a worker", row["status"] == "completed" and row["worker_id"], f"{row['status']} {row['worker_id']}")
+    completed = sorted(e["payload"]["scanner"] for e in events if e["type"] == "job_completed")
+    check("a worker of each scanner completed its job", completed == ["interceptor", "tracer"], str(completed))
     async with http.get(f"{API}/api/scans/{scan_id}/services") as r:
         services = {(s["host"], s["port"]): (s["auth_method"], s["severity"]) for s in await r.json()}
     check("services: Basic on 8803 blocks, 8802 clears",
           services.get(("127.0.0.1", 8803)) == ("basic", "blocker")
           and services.get(("127.0.0.1", 8802), ("", ""))[1] == "cleared", str(services))
+    check("the tracer adds 8804, which only the config names",
+          services.get(("127.0.0.1", 8804)) == ("unauthenticated", "cleared"), str(services))
     n_events, n_ended = await asyncio.wait_for(notifications, 15)
     check("/notifications delivers scan_completed",
           n_ended == "terminal" and n_events[-1]["scan_id"] == scan_id and n_events[-1]["type"] == "scan_completed")
@@ -384,7 +416,7 @@ async def cancel_running(h, http, slow_app, finished_scan, baseline):
     await h.wait_running(scan_id)
     t0 = time.monotonic()
     status = await cancel(http, scan_id)
-    row = await h.wait_status(scan_id, {"cancelled", "failed", "completed"}, 20)
+    row = await h.wait_status(scan_id, ENDED, 20)
     took = time.monotonic() - t0
     # Design: up to one 5s heartbeat plus ~0.1s unwinding. The slack is for a loaded laptop; a broken cancel runs ~50s.
     check("cancelling a running scan: 204, then cancelled promptly",
@@ -399,21 +431,25 @@ async def cancel_running(h, http, slow_app, finished_scan, baseline):
 
 
 async def graceful_shutdown(h, http, slow_app, baseline):
-    print("graceful worker shutdown mid-scan", flush=True)
+    print("graceful shutdown of both workers mid-scan", flush=True)
     scan_id = await create_scan(http, slow_app)
     await h.wait_running(scan_id)
-    sent, how = h.stop_worker_gracefully("A")
-    code = await wait_exit(h.workers["A"], 30)
-    check("worker exits cleanly within 30s", sent and code == 0, f"{how}, exit {code}")
+    tracer = await h.wait_job_claimed(scan_id, "tracer")
+    check("both scanners' jobs are running", tracer == "running", f"tracer job {tracer}")
+    stops = {name: h.stop_worker_gracefully(name) for name in ("A", "T")}
+    for name, (sent, how) in stops.items():
+        code = await wait_exit(h.workers[name], 30)
+        check(f"worker {name} exits cleanly within 30s", sent and code == 0, f"{how}, exit {code}")
+    error = "interceptor: worker shut down; tracer: worker shut down"
     row = await h.scan(scan_id)
-    check("scan ends failed / worker shut down", (row["status"], row["error"]) == ("failed", "worker shut down"), f"{row['status']} / {row['error']}")
+    check("scan ends failed, both jobs worker shut down", (row["status"], row["error"]) == ("failed", error), f"{row['status']} / {row['error']}")
     last = (await h.events(scan_id))[-1]
-    check("terminal event scan_failed error worker shut down", last[1:] == ("scan_failed", {"error": "worker shut down"}), str(last))
+    check("terminal event scan_failed with both errors", last[1:] == ("scan_failed", {"error": error}), str(last))
     await check_no_chromium_left("no Chromium left after shutdown", baseline)
 
 
 async def shared_queue(h, http, fast_app):
-    print("queue without workers, then two workers", flush=True)
+    print("queue without workers, then two interceptor workers and a tracer worker", flush=True)
     queued = [await create_scan(http, fast_app) for _ in range(3)]
     doomed = await create_scan(http, fast_app)
     status = await cancel(http, doomed)
@@ -424,17 +460,19 @@ async def shared_queue(h, http, fast_app):
     check("scans stay queued while no worker runs", all(r["status"] == "queued" for r in rows), str([r["status"] for r in rows]))
     h.start_worker("B", 1)
     h.start_worker("C", 1)
-    rows = [await h.wait_status(s, {"completed", "failed", "cancelled"}, 120) for s in queued]
+    h.start_worker("U", 2, scanner="tracer")
+    rows = [await h.wait_status(s, ENDED, 120) for s in queued]
     check("all complete once workers start", all(r["status"] == "completed" for r in rows), str([r["status"] for r in rows]))
-    logs = h.worker_log("B") + h.worker_log("C")
-    claims = {s: logs.count(f"Claimed scan {s}") for s in queued}
-    check("each scan claimed exactly once", all(c == 1 for c in claims.values()), str(claims))
-    check("the cancelled scan is never claimed", f"Claimed scan {doomed}" not in logs)
-    check("both workers took scans", len({r["worker_id"] for r in rows}) == 2)
+    # One "Claimed scan" line per job: an interceptor worker's, and the tracer worker's.
+    for scanner, logs in (("interceptor", h.worker_log("B") + h.worker_log("C")), ("tracer", h.worker_log("U"))):
+        claims = {s: logs.count(f"Claimed scan {s}") for s in queued}
+        check(f"each scan's {scanner} job claimed exactly once", all(c == 1 for c in claims.values()), str(claims))
+        check(f"the cancelled scan's {scanner} job is never claimed", f"Claimed scan {doomed}" not in logs)
+    check("both interceptor workers took scans", len({r["worker_id"] for r in rows}) == 2)
 
 
 async def hard_kill(h, http, slow_app, baseline):
-    print("hard-kill a worker mid-scan (slow)", flush=True)
+    print("hard-kill an interceptor worker mid-scan (slow)", flush=True)
     scan_id = await create_scan(http, slow_app)
     row = await h.wait_running(scan_id)
     # Match on the ready line: on Windows the venv python.exe is a launcher, so pids differ.
@@ -444,10 +482,17 @@ async def hard_kill(h, http, slow_app, baseline):
         return
     h.workers[victim].kill()
     t0 = time.monotonic()
-    row = await h.wait_status(scan_id, {"failed", "cancelled", "completed"}, 130)
-    check("the surviving worker reaps it as failed / worker lost",
-          (row["status"], row["error"]) == ("failed", "worker lost"), f"{row['status']} / {row['error']} after {time.monotonic() - t0:.0f}s")
-    check("with scan_failed error worker lost", (await h.events(scan_id))[-1][1:] == ("scan_failed", {"error": "worker lost"}))
+    row = await h.wait_status(scan_id, ENDED, 130)
+    jobs = await h.jobs(scan_id)
+    check("a surviving worker reaps its job as failed / worker lost",
+          jobs["interceptor"] == ("failed", "worker lost"), f"{jobs} after {time.monotonic() - t0:.0f}s")
+    # The tracer worker was not touched, so its half of the scan stands.
+    check("the scan ends partial, naming the lost scanner",
+          (row["status"], row["error"]) == ("partial", "interceptor: worker lost"), f"{row['status']} / {row['error']}")
+    _, last_type, last_payload = (await h.events(scan_id))[-1]
+    check("with scan_completed, partial, failed_scanners interceptor",
+          last_type == "scan_completed" and last_payload.get("partial") is True
+          and last_payload.get("failed_scanners") == ["interceptor"], f"{last_type} {last_payload}")
     await check_no_chromium_left("no Chromium orphaned by the kill", baseline)
 
 
@@ -484,7 +529,9 @@ async def run(slow):
     http = aiohttp.ClientSession()
     try:
         await h.start_api(http)
+        # A scan has a job per scanner, so it takes a worker of each to finish one.
         h.start_worker("A", 2)
+        h.start_worker("T", 2, scanner="tracer")
         fast_app = await create_app(http, "/fast")
         slow_app = await create_app(http, "/slow")
         finished = await happy_path(h, http, fast_app)

@@ -8,6 +8,7 @@ from sqlalchemy import case, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from config_tracer.settings import ScanSettings
 from core import jobs
 from core.db import (
     AppRow,
@@ -50,6 +51,10 @@ _FILL_IN_AUTH_METHODS = (
 
 def _session_factory(request: Request) -> async_sessionmaker[AsyncSession]:
     return request.app.state.session_factory
+
+
+def _tracer_settings(request: Request) -> ScanSettings:
+    return request.app.state.tracer_settings
 
 
 def _summary_aggregates_subq():
@@ -248,20 +253,26 @@ async def create_scan(body: CreateScanRequest, request: Request) -> CreateScanRe
                 started_by=started_by,
             )
         )
-        session.add(
-            ScanJobRow(
-                id=uuid.uuid4().hex,
-                scan_id=scan_id,
-                scanner=Scanner.interceptor.value,
-                status=JobStatus.queued.value,
-                # None leaves the depth to the worker's config.json.
-                settings={"max_depth": body.max_depth},
-                created_at=started_at,
+        # One job per scanner, each with its settings as they stand now.
+        job_settings = {
+            # None leaves the depth to the worker's config.json.
+            Scanner.interceptor: {"max_depth": body.max_depth},
+            Scanner.tracer: _tracer_settings(request).model_dump(mode="json"),
+        }
+        for scanner, settings in job_settings.items():
+            session.add(
+                ScanJobRow(
+                    id=uuid.uuid4().hex,
+                    scan_id=scan_id,
+                    scanner=scanner.value,
+                    status=JobStatus.queued.value,
+                    settings=settings,
+                    created_at=started_at,
+                )
             )
-        )
         # Same transaction as the scan, so no event can precede it.
         await emit_event(session, scan_id, "scan_started", {"url": start_url, "name": name})
-        # Committing the queued job is the whole enqueue; a worker claims it.
+        # Committing the queued jobs is the whole enqueue; a worker of each scanner claims its own.
         await session.commit()
 
     return CreateScanResponse(scan_id=scan_id)

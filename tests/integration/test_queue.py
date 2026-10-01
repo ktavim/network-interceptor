@@ -6,14 +6,20 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from sqlalchemy import select
 
+from config_tracer.models import AuthMethod as TracerAuthMethod
+from config_tracer.models import HttpMethod, Origin
+from config_tracer.report import ScanReport, ServiceReport, UrlEvidence
+from config_tracer.settings import ScanSettings
 from core.db import AppRow, ScanEventRow, ScanJobRow, ScanRow, ServiceFindingRow, ServiceRow, UrlRow
 from core.enums import JobStatus, Scanner
 from core.events import emit_event_now
 from core.jobs import ClaimedJob, cancel, claim_next, finish, heartbeat, reap_stale, release
 from core.translate import services_to_rows
-from worker.job import LEASE_LOST, SHUTDOWN, USER, Job, run_scan_job
+from worker.job import LEASE_LOST, SHUTDOWN, USER, Job, run_interceptor_job, run_tracer_job
 
 STALE = timedelta(minutes=5)
+# A scan timeout no test job reaches.
+NO_TIMEOUT = 3600
 
 INTERCEPTOR = Scanner.interceptor
 TRACER = Scanner.tracer
@@ -393,7 +399,7 @@ def fake_mapper(monkeypatch):
 async def _start_job(factory, scan_id, make_config, settings=None) -> Job:
     row = await _job(factory, scan_id)
     job = Job(ClaimedJob(row.id, scan_id, INTERCEPTOR, "http://x", settings or {"max_depth": None}))
-    job.task = asyncio.create_task(run_scan_job(job, make_config(), factory))
+    job.task = asyncio.create_task(run_interceptor_job(job, factory, make_config(), NO_TIMEOUT))
     return job
 
 
@@ -480,3 +486,156 @@ async def test_job_that_raises_records_failure(factory, fake_mapper, make_config
     scan = await _scan(factory, scan_id)
     assert (scan.status, scan.error) == ("failed", "RuntimeError: navigation exploded")
     assert await _event_types(factory, scan_id) == ["job_failed", "scan_failed"]
+
+
+class _FakePipeline:
+    """Stands in for the tracer's pipeline; run_scan returns `report`, or blocks when it is None."""
+
+    def __init__(self):
+        self.report = None
+        self.seeds = None
+        self.settings = None
+
+    async def run_scan(self, seeds, settings):
+        self.seeds, self.settings = seeds, settings
+        if self.report is None:
+            await asyncio.sleep(3600)
+        return self.report
+
+
+@pytest.fixture
+def fake_pipeline(monkeypatch):
+    pipeline = _FakePipeline()
+    monkeypatch.setattr("worker.job.run_scan", pipeline.run_scan)
+    return pipeline
+
+
+def _traced(host, verdict, urls, ips=()) -> ServiceReport:
+    """One service of a tracer report."""
+    return ServiceReport(
+        origin=Origin("https", host, 443), ips=list(ips), auth_verdict=verdict,
+        urls_probed=sum(u.http_method is not None for u in urls), urls=urls,
+    )
+
+
+async def _run_tracer_job(factory, scan_id, settings=None, timeout_s=NO_TIMEOUT) -> ScanJobRow:
+    """Run the scan's tracer job to its end; returns its row."""
+    row = await _job(factory, scan_id, TRACER)
+    job = Job(ClaimedJob(row.id, scan_id, TRACER, "http://x", settings or {}))
+    job.task = asyncio.create_task(run_tracer_job(job, factory, timeout_s))
+    await asyncio.wait({job.task})
+    assert job.task.exception() is None
+    return await _job(factory, scan_id, TRACER)
+
+
+async def test_completed_tracer_job_records_services_and_events(factory, fake_pipeline):
+    # As with only a tracer worker running: the interceptor job stays queued.
+    scan_id = await _add_scan(factory, tracer={})
+    await claim_next(factory, TRACER, "w")
+    fake_pipeline.report = ScanReport(suspect_urls=[], services=[
+        _traced("a.example", TracerAuthMethod.BASIC, ips=["10.0.0.1"], urls=[
+            UrlEvidence(
+                url="https://a.example/api?key=sk-123", http_method=HttpMethod.HEAD, status_code=401,
+                www_authenticate='Basic realm="x"', detected_method=TracerAuthMethod.BASIC,
+                sources=["network: http://x/config.json?v=2"],
+            ),
+            UrlEvidence(
+                url="https://a.example/old", http_method=HttpMethod.GET, status_code=302,
+                location="/login?next=%2Fold", detected_method=TracerAuthMethod.LOGIN_REDIRECT,
+                sources=["js: http://x/main.js"],
+            ),
+        ]),
+        _traced("internal-only.corp", TracerAuthMethod.DNS_FAILED, urls=[
+            UrlEvidence(
+                url="https://internal-only.corp/v1", detected_method=TracerAuthMethod.DNS_FAILED,
+                error="NXDOMAIN", sources=["js: http://x/main.js"],
+            ),
+        ]),
+    ])
+
+    row = await _run_tracer_job(factory, scan_id)
+
+    assert fake_pipeline.seeds == ["http://x"]
+    # The tracer counts no pages.
+    assert (row.status, row.error, row.pages_crawled) == ("completed", None, None)
+    # The scan waits for its interceptor job, with the tracer's services already showing.
+    assert (await _scan(factory, scan_id)).status == "running"
+    basic, failed = await _services(factory, scan_id)
+    assert (basic.host, basic.auth_method, basic.severity) == ("a.example", "basic", "blocker")
+    assert (basic.request_count, basic.ips) == (2, ["10.0.0.1"])
+    assert (failed.host, failed.auth_method, failed.severity) == ("internal-only.corp", "dns_failed", "review")
+    assert (failed.request_count, failed.ips) == (1, None)
+    assert await _findings(factory, basic.id) == {"tracer": ("basic", 2)}
+    assert await _findings(factory, failed.id) == {"tracer": ("dns_failed", 1)}
+    async with factory() as session:
+        urls = {u.url: u for u in (await session.execute(select(UrlRow))).scalars()}
+    assert set(urls) == {"https://a.example/api", "https://a.example/old", "https://internal-only.corp/v1"}
+    assert all((u.scanner, u.resource_type, u.page_url) == ("tracer", "probe", "") for u in urls.values())
+    challenged = urls["https://a.example/api"]
+    assert basic.evidence_url_id == challenged.id
+    assert (challenged.method, challenged.status_code, challenged.auth_method) == ("HEAD", 401, "basic")
+    assert (challenged.auth_challenge, challenged.sources) == ('Basic realm="x"', ["network: http://x/config.json"])
+    redirected = urls["https://a.example/old"]
+    assert (redirected.method, redirected.status_code, redirected.auth_method) == ("GET", 302, "login_redirect")
+    assert redirected.redirect_url == "https://a.example/login"
+    unresolved = urls["https://internal-only.corp/v1"]
+    assert failed.evidence_url_id == unresolved.id
+    assert (unresolved.method, unresolved.status_code, unresolved.failure_reason) == ("", 0, "NXDOMAIN")
+    assert (await _job(factory, scan_id)).status == "queued"
+    assert await _events(factory, scan_id) == [
+        (0, "job_started", {"scanner": "tracer"}),
+        (1, "auth_detected", {"scheme": "https", "host": "a.example", "port": 443,
+                              "method": "basic", "scanner": "tracer"}),
+        (2, "auth_detected", {"scheme": "https", "host": "internal-only.corp", "port": 443,
+                              "method": "dns_failed", "scanner": "tracer"}),
+        (3, "job_completed", {"scanner": "tracer", "services": 2}),
+    ]
+
+
+async def test_tracer_job_runs_with_its_settings_snapshot(factory, fake_pipeline):
+    scan_id = await _add_scan(factory, status="running", tracer={})
+    fake_pipeline.report = ScanReport(services=[], suspect_urls=[])
+    snapshot = ScanSettings(max_pages=7, follow_links=True, probe_concurrency=2)
+
+    row = await _run_tracer_job(factory, scan_id, settings=snapshot.model_dump(mode="json"))
+
+    assert row.status == "completed"
+    assert fake_pipeline.settings == snapshot
+
+
+async def test_tracer_job_with_a_snapshot_it_cannot_read_fails(factory, fake_pipeline):
+    scan_id = await _add_scan(factory, status="running", tracer={})
+    row = await _run_tracer_job(factory, scan_id, settings={"max_depth": 3})
+    assert row.status == "failed" and row.error.startswith("ValidationError")
+    # The pipeline never ran.
+    assert fake_pipeline.seeds is None
+
+
+async def test_tracer_job_fails_on_a_report_with_an_unprobed_url(factory, fake_pipeline):
+    # A scan probes every URL or marks it dns_failed, so this is a pipeline bug:
+    # the job fails with nothing stored rather than completing with a gap.
+    scan_id = await _add_scan(factory, status="running", tracer={})
+    fake_pipeline.report = ScanReport(suspect_urls=[], services=[
+        _traced("a.example", None, urls=[UrlEvidence(url="https://a.example/api", sources=["js: http://x/a.js"])]),
+    ])
+
+    row = await _run_tracer_job(factory, scan_id)
+
+    assert (row.status, row.error) == ("failed", "ValueError: None is not a valid AuthMethod")
+    assert await _services(factory, scan_id) == []
+    assert await _event_types(factory, scan_id) == ["job_failed"]
+
+
+async def test_tracer_job_past_the_scan_timeout_fails_and_the_scan_ends_partial(factory, fake_pipeline):
+    scan_id = await _add_scan(factory, status="running", tracer={})
+    error = "TimeoutError: scan exceeded SCAN_TIMEOUT_S=0.05s"
+
+    row = await _run_tracer_job(factory, scan_id, timeout_s=0.05)
+
+    assert (row.status, row.error) == ("failed", error)
+    assert (await _scan(factory, scan_id)).status == "running"
+    assert await _events(factory, scan_id) == [(0, "job_failed", {"scanner": "tracer", "error": error})]
+    # The other job completes: one scanner's results, and the scan says whose are missing.
+    await _finish(factory, scan_id, INTERCEPTOR, JobStatus.completed)
+    scan = await _scan(factory, scan_id)
+    assert (scan.status, scan.error) == ("partial", f"tracer: {error}")

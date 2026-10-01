@@ -179,7 +179,13 @@ async def crawl(
             queue.append(s)
 
     async with async_playwright() as pw:
-        browser = await pw.chromium.launch(headless=True)
+        # The worker owns shutdown; Playwright closing the browser on a signal would fail the scan.
+        browser = await pw.chromium.launch(
+            headless=True,
+            handle_sigint=False,
+            handle_sigterm=False,
+            handle_sighup=False,
+        )
         context = await browser.new_context()
 
         pages_visited = 0

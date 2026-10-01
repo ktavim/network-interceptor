@@ -1,4 +1,9 @@
-"""Scan worker: claims queued interceptor jobs from Postgres and crawls their scans. Run with `python -m worker`."""
+"""Scan worker: claims one scanner's queued jobs from Postgres and runs them.
+
+Run with `python -m worker`, with WORKER_SCANNER naming the scanner whose jobs
+it takes: `interceptor` or `tracer`. A scan has a job for each, so it takes a
+worker of each kind to finish one.
+"""
 import asyncio
 import logging
 import os
@@ -6,7 +11,8 @@ import signal
 import socket
 import sys
 import uuid
-from typing import Dict, List
+from functools import partial
+from typing import Awaitable, Callable, Dict, List
 
 from dotenv import load_dotenv
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -16,7 +22,15 @@ from core.db import make_engine, make_session_factory
 from core.enums import JobStatus, Scanner
 from core.jobs import claim_next, heartbeat, reap_stale, release
 
-from .job import LEASE_LOST, SHUTDOWN, USER, Job, record_failure, run_scan_job
+from .job import (
+    LEASE_LOST,
+    SHUTDOWN,
+    USER,
+    Job,
+    record_failure,
+    run_interceptor_job,
+    run_tracer_job,
+)
 
 load_dotenv()
 
@@ -32,6 +46,36 @@ HEARTBEAT_INTERVAL = 5.0
 REAP_INTERVAL = 30.0
 # Under OpenShift's default 30s termination grace period.
 SHUTDOWN_TIMEOUT = 20.0
+# The hard cap on one run of a scanner's engine, unless SCAN_TIMEOUT_S sets
+# another. One value per scanner: the tracer's suits its one-page crawl, and a
+# depth-3 interceptor crawl legitimately runs far longer.
+DEFAULT_SCAN_TIMEOUT_S = {Scanner.interceptor: 3600.0, Scanner.tracer: 900.0}
+
+# Runs one claimed job to its end and records the outcome (worker.job).
+RunJob = Callable[[Job], Awaitable[None]]
+
+
+def _scanner_from_env() -> Scanner:
+    name = os.environ.get("WORKER_SCANNER", "").strip()
+    try:
+        return Scanner(name)
+    except ValueError:
+        names = " or ".join(s.value for s in Scanner)
+        sys.exit(f"WORKER_SCANNER must be {names} (got {name!r}): the scanner whose jobs this worker runs")
+
+
+def _scan_timeout_from_env(scanner: Scanner) -> float:
+    raw = os.environ.get("SCAN_TIMEOUT_S", "").strip()
+    if not raw:
+        return DEFAULT_SCAN_TIMEOUT_S[scanner]
+    try:
+        timeout_s = float(raw)
+    except ValueError:
+        timeout_s = 0.0
+    # NaN fails the comparison too.
+    if not 0 < timeout_s < float("inf"):
+        sys.exit(f"SCAN_TIMEOUT_S must be a positive number of seconds (got {raw!r})")
+    return timeout_s
 
 
 def _default_base_config() -> Config:
@@ -63,12 +107,15 @@ class Worker:
     def __init__(
         self,
         session_factory: async_sessionmaker[AsyncSession],
-        base_config: Config,
+        scanner: Scanner,
+        run_job: RunJob,
         max_parallel: int,
     ):
         self.id = f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:6]}"
         self.session_factory = session_factory
-        self.base_config = base_config
+        # The scanner whose jobs this worker claims, and what runs one.
+        self.scanner = scanner
+        self.run_job = run_job
         self.max_parallel = max_parallel
         # By job id.
         self.jobs: Dict[str, Job] = {}
@@ -77,7 +124,7 @@ class Worker:
     async def _slot(self) -> None:
         while not self.shutting_down:
             try:
-                claim = await claim_next(self.session_factory, Scanner.interceptor, self.id)
+                claim = await claim_next(self.session_factory, self.scanner, self.id)
             except Exception as e:
                 logger.warning("Claim failed: %s", e)
                 claim = None
@@ -90,10 +137,7 @@ class Worker:
 
             logger.info("Claimed scan %s (%s)", claim.scan_id, claim.url)
             job = Job(claim)
-            job.task = asyncio.create_task(
-                run_scan_job(job, self.base_config, self.session_factory),
-                name=f"scan-{claim.scan_id}",
-            )
+            job.task = asyncio.create_task(self.run_job(job), name=f"scan-{claim.scan_id}")
             self.jobs[claim.id] = job
             # wait(), not await: cancelling the slot must not cancel the job.
             await asyncio.wait({job.task})
@@ -174,15 +218,29 @@ class Worker:
 
 
 async def main() -> int:
-    base_config = _load_base_config()
+    scanner = _scanner_from_env()
+    timeout_s = _scan_timeout_from_env(scanner)
     max_parallel = int(os.environ.get("CRAWLER_MAX_PARALLEL", "2"))
     engine = make_engine()
-    worker = Worker(make_session_factory(engine), base_config, max_parallel)
+    session_factory = make_session_factory(engine)
+    if scanner is Scanner.tracer:
+        run_job = partial(run_tracer_job, session_factory=session_factory, timeout_s=timeout_s)
+    else:
+        run_job = partial(
+            run_interceptor_job,
+            session_factory=session_factory,
+            base_config=_load_base_config(),
+            timeout_s=timeout_s,
+        )
+    worker = Worker(session_factory, scanner, run_job, max_parallel)
 
     if sys.platform != "win32":
         asyncio.get_running_loop().add_signal_handler(signal.SIGTERM, asyncio.current_task().cancel)
 
-    logger.info("Worker %s ready (max_parallel=%d)", worker.id, max_parallel)
+    logger.info(
+        "Worker %s ready (scanner=%s, max_parallel=%d, scan timeout %gs)",
+        worker.id, scanner.value, max_parallel, timeout_s,
+    )
     try:
         return await worker.run()
     finally:
