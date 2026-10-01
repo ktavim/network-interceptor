@@ -1,4 +1,5 @@
 playwright==1.59.0
+aiohttp==3.14.3
 python-dotenv
 fastapi
 uvicorn[standard]

@@ -1,6 +1,6 @@
 # Merging config-tracer into network-interceptor
 
-**Status:** proposal, 2026-09-30, revised 2026-10-01. No code has changed yet. The merged service starts on a fresh database. Both existing databases hold only dev data; they stay in place, untouched, as the record of what today's code produced.
+**Status:** proposal, 2026-09-30, revised 2026-10-01. Step 1 (§7) is done, 2026-10-01; no later step has started. The merged service starts on a fresh database. Both existing databases hold only dev data; they stay in place, untouched, as the record of what today's code produced.
 
 ## 1. Goal
 
