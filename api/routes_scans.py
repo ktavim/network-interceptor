@@ -38,8 +38,12 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 # The auth methods a manual correction may replace, and so never set: the ones
-# that mean the crawler could not tell what the service takes.
-_FILL_IN_AUTH_METHODS = (AuthMethod.unknown.value, AuthMethod.no_response.value)
+# that mean the scanners could not tell what the service takes.
+_FILL_IN_AUTH_METHODS = (
+    AuthMethod.unknown.value,
+    AuthMethod.no_response.value,
+    AuthMethod.dns_failed.value,
+)
 
 
 def _session_factory(request: Request) -> async_sessionmaker[AsyncSession]:
@@ -279,14 +283,15 @@ async def patch_service(
 
         if body.auth_method is not None:
             # Manual auth correction is allowed only as a fill-in for what the
-            # crawler couldn't classify ("unknown") or never got an answer from
-            # ("no_response") — never to override an auto-detected method, and
-            # never back to either. "other" (a real but unnamed challenge)
-            # counts as classified, so it stays locked here too.
+            # scanners couldn't classify ("unknown"), never got an answer from
+            # ("no_response") or couldn't resolve ("dns_failed") — never to
+            # override an auto-detected method, and never back to any of them.
+            # "other" (a real but unnamed challenge) counts as classified, so
+            # it stays locked here too.
             if service.auth_method not in _FILL_IN_AUTH_METHODS:
                 raise HTTPException(
                     status_code=409,
-                    detail={"message": "auth method can only be set manually while it is unknown or no_response"},
+                    detail={"message": "auth method can only be set manually while it is unknown, no_response or dns_failed"},
                 )
             if body.auth_method.value in _FILL_IN_AUTH_METHODS:
                 raise HTTPException(

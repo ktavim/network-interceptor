@@ -61,14 +61,17 @@ async def _patch(factory, scan_id, service_id, auth_method: AuthMethod):
     return await patch_service(scan_id, service_id, PatchServiceRequest(auth_method=auth_method), request)
 
 
-@pytest.mark.parametrize("fill_in", [AuthMethod.unknown, AuthMethod.no_response])
+_FILL_INS = [AuthMethod.unknown, AuthMethod.no_response, AuthMethod.dns_failed]
+
+
+@pytest.mark.parametrize("fill_in", _FILL_INS)
 async def test_fill_in_methods_can_be_set_and_severity_follows(factory, fill_in):
     scan_id, service_id = await _add_service(factory, fill_in, Severity.review)
     service = await _patch(factory, scan_id, service_id, AuthMethod.ntlm)
     assert (service.auth_method, service.severity) == ("ntlm", "blocker")
 
 
-@pytest.mark.parametrize("target", [AuthMethod.unknown, AuthMethod.no_response])
+@pytest.mark.parametrize("target", _FILL_INS)
 async def test_cannot_set_a_fill_in_method(factory, target):
     # Only the crawler says it could not tell; a person fills in what it is.
     scan_id, service_id = await _add_service(factory, AuthMethod.no_response, Severity.review)

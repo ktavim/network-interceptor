@@ -1,6 +1,6 @@
 # Merging config-tracer into network-interceptor
 
-**Status:** proposal, 2026-09-30, revised 2026-10-01. Step 1 (§7) is done, 2026-10-01; no later step has started. The merged service starts on a fresh database. Both existing databases hold only dev data; they stay in place, untouched, as the record of what today's code produced.
+**Status:** proposal, 2026-09-30, revised 2026-10-01. Steps 1 and 2 (§7) are done, 2026-10-01; no later step has started. The merged service starts on a fresh database. Both existing databases hold only dev data; they stay in place, untouched, as the record of what today's code produced.
 
 ## 1. Goal
 
@@ -325,6 +325,7 @@ Recorded 2026-10-01, with code at `da05d49` (network-interceptor) and `fa2da7d` 
 - `core/enums.py`: add `login_redirect` and `dns_failed`, plus `Scanner` and `JobStatus`. `api/models.py`: add `partial` to `ScanStatus`.
 - `core/translate.py`: extend `severity_for` to the new values.
 - `core/merge.py`: the cross-scanner order and the refinements, with unit tests, including the `negotiate`/`kerberos`, `dns_failed`-with-IPs and interceptor-`no_response`-with-tracer-answer cases, and the token-API case (`bearer` + `unknown` → `bearer`).
+- `api/routes_scans.py`: `dns_failed` joins `_FILL_IN_AUTH_METHODS` (D3). It lands here because the PATCH body is typed `AuthMethod`: once the enum has `dns_failed`, a user could otherwise set a service to it.
 - **Done when:** the unit tests pass. No database change is needed.
 
 ### Step 3: Fresh database and the job queue (interceptor only)

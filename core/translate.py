@@ -38,12 +38,20 @@ def severity_for(auth_method: AuthMethod) -> Severity:
     unsupported until someone names it in the detector. Review is for what
     cannot be told yet -- "negotiate" is SPNEGO whose mechanism (Kerberos or
     NTLM) went unresolved, "no_response" is an origin none of whose requests
-    got an answer, and "unknown" means a producer drifted from the vocabulary.
-    The manual auth-method override exists to fill in the last two.
+    got an answer, "dns_failed" is an origin whose host the tracer could not
+    resolve, and "unknown" is an answer that names no scheme: from the tracer
+    a bare 401, a coarse 4xx or a 5xx, from the interceptor a producer that
+    drifted from the vocabulary. The manual auth-method override exists to
+    fill in the last three.
     """
     if auth_method in (AuthMethod.ntlm, AuthMethod.basic, AuthMethod.other):
         return Severity.blocker
-    if auth_method in (AuthMethod.negotiate, AuthMethod.no_response, AuthMethod.unknown):
+    if auth_method in (
+        AuthMethod.negotiate,
+        AuthMethod.no_response,
+        AuthMethod.dns_failed,
+        AuthMethod.unknown,
+    ):
         return Severity.review
     return Severity.cleared
 

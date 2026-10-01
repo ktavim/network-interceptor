@@ -13,38 +13,43 @@ from core.translate import (
 
 
 class TestSeverityFor:
-    @pytest.mark.parametrize(
-        "auth_method", [AuthMethod.ntlm, AuthMethod.basic, AuthMethod.other]
-    )
+    BLOCKERS = [AuthMethod.ntlm, AuthMethod.basic, AuthMethod.other]
+    REVIEW = [
+        AuthMethod.negotiate,
+        AuthMethod.no_response,
+        AuthMethod.dns_failed,
+        AuthMethod.unknown,
+    ]
+    CLEARED = [
+        AuthMethod.kerberos,
+        AuthMethod.oauth,
+        AuthMethod.login_redirect,
+        AuthMethod.bearer,
+        AuthMethod.api_key,
+        AuthMethod.unauthenticated,
+    ]
+
+    @pytest.mark.parametrize("auth_method", BLOCKERS)
     def test_blockers(self, auth_method):
         # The known-unsupported schemes and, since only named schemes are
         # supported for the publish, any real scheme the crawler could not name.
         assert severity_for(auth_method) == Severity.blocker
 
-    @pytest.mark.parametrize(
-        "auth_method", [AuthMethod.negotiate, AuthMethod.no_response, AuthMethod.unknown]
-    )
+    @pytest.mark.parametrize("auth_method", REVIEW)
     def test_review(self, auth_method):
         # What cannot be told yet: SPNEGO with its mechanism unresolved, an
-        # origin nothing on which answered, or a tag outside the vocabulary.
+        # origin nothing on which answered, a host that did not resolve, or
+        # an answer that names no scheme.
         assert severity_for(auth_method) == Severity.review
 
-    @pytest.mark.parametrize(
-        "auth_method",
-        [
-            AuthMethod.kerberos,
-            AuthMethod.oauth,
-            AuthMethod.bearer,
-            AuthMethod.unauthenticated,
-        ],
-    )
+    @pytest.mark.parametrize("auth_method", CLEARED)
     def test_cleared(self, auth_method):
         assert severity_for(auth_method) == Severity.cleared
 
-    def test_every_auth_method_is_mapped(self):
-        # Guards against a new AuthMethod slipping through without a severity.
-        for auth_method in AuthMethod:
-            assert isinstance(severity_for(auth_method), Severity)
+    def test_every_auth_method_is_pinned(self):
+        # severity_for clears whatever it does not name, so a new AuthMethod
+        # has to be placed in a tier here before it can slip through as cleared.
+        assert set(self.BLOCKERS + self.REVIEW + self.CLEARED) == set(AuthMethod)
 
 
 class TestTagToAuthMethod:

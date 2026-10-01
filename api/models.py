@@ -10,6 +10,8 @@ class ScanStatus(str, Enum):
     queued = "queued"
     running = "running"
     completed = "completed"
+    # At least one of the scan's jobs completed and the rest failed.
+    partial = "partial"
     failed = "failed"
     cancelled = "cancelled"
 
