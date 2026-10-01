@@ -1,6 +1,6 @@
 # Merging config-tracer into network-interceptor
 
-**Status:** proposal, 2026-09-30, revised 2026-10-01. Steps 1 and 2 (§7) are done, 2026-10-01; no later step has started. The merged service starts on a fresh database. Both existing databases hold only dev data; they stay in place, untouched, as the record of what today's code produced.
+**Status:** proposal, 2026-09-30, revised 2026-10-01. Steps 1 to 3 (§7) are done, 2026-10-01; no later step has started. The merged service runs on a fresh database, `f35`; the step 3 comparison scan there is `cd26d91452d74820ac5edb6f78cdd5c6`. Both existing databases hold only dev data; they stay in place, untouched, as the record of what today's code produced.
 
 ## 1. Goal
 
@@ -333,7 +333,7 @@ Recorded 2026-10-01, with code at `da05d49` (network-interceptor) and `fa2da7d` 
 The new schema and the code that uses it land together, because today's worker reads `scans.worker_id` and `heartbeat_at`, which the new `scans` table doesn't have.
 
 - Create two empty databases, `f35` and `f35_test`, and point `DATABASE_URL` in `.env` at the first.
-- Delete `alembic/versions/*` and write one initial revision that creates the whole schema from §4.2, including the CHECK constraints from §4.1. As network-interceptor's current initial migration does, add the `use_alter` foreign keys (`apps.current_scan_id`, `services.evidence_url_id`, `service_findings.evidence_url_id`) explicitly, because `op.create_table` skips them on PostgreSQL.
+- Delete `alembic/versions/*` and write one initial revision that creates the whole schema from §4.2, including the CHECK constraints from §4.1. As network-interceptor's current initial migration does, add the `use_alter` foreign keys (`apps.current_scan_id`, `services.evidence_url_id`) explicitly, because `op.create_table` skips them on PostgreSQL. `service_findings.evidence_url_id` is in no cycle, so it needs no `use_alter` and goes inline.
 - Update `core/db.py` to match: add `ScanJobRow` and `ServiceFindingRow`, and remove the worker columns from `ScanRow`.
 - `core/jobs.py` replaces `worker/queue.py` and adds `finalize_scan`.
 - `POST /api/scans` creates one interceptor job. Cancel works on jobs.

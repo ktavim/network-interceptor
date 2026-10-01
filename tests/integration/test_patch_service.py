@@ -1,41 +1,15 @@
 """The manual auth-method override in PATCH /scans/{id}/services/{id}, against a
 real Postgres. Set TEST_DATABASE_URL to run."""
-import os
 import uuid
 from types import SimpleNamespace
 
 import pytest
-from dotenv import dotenv_values
 from fastapi import HTTPException
-from sqlalchemy import text
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from api.models import PatchServiceRequest
 from api.routes_scans import patch_service
-from core.db import AppRow, Base, ScanRow, ServiceRow
+from core.db import AppRow, ScanRow, ServiceRow
 from core.enums import AuthMethod, Severity
-
-TEST_DATABASE_URL = os.environ.get("TEST_DATABASE_URL")
-DEV_DATABASE_URL = os.environ.get("DATABASE_URL") or dotenv_values().get("DATABASE_URL")
-
-pytestmark = [
-    pytest.mark.skipif(not TEST_DATABASE_URL, reason="TEST_DATABASE_URL not set"),
-    # The fixture truncates every table.
-    pytest.mark.skipif(
-        TEST_DATABASE_URL is not None and TEST_DATABASE_URL == DEV_DATABASE_URL,
-        reason="TEST_DATABASE_URL is DATABASE_URL",
-    ),
-]
-
-
-@pytest.fixture
-async def factory():
-    engine = create_async_engine(TEST_DATABASE_URL)
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-        await conn.execute(text("TRUNCATE apps, scans, scan_events, services, urls, submissions CASCADE"))
-    yield async_sessionmaker(engine, expire_on_commit=False)
-    await engine.dispose()
 
 
 async def _add_service(factory, auth_method: AuthMethod, severity: Severity) -> tuple:

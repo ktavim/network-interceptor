@@ -137,6 +137,7 @@ def scan_to_detail(
     blocker_count: int,
     service_count: int,
     auth_methods: int,
+    pages_crawled: int,
     submitted_at: datetime | None = None,
     submitted_by: str | None = None,
 ) -> ScanDetail:
@@ -155,7 +156,7 @@ def scan_to_detail(
         blocker_count=blocker_count,
         service_count=service_count,
         duration_ms=duration_ms,
-        pages_crawled=scan.pages_crawled,
+        pages_crawled=pages_crawled,
         auth_methods_identified=auth_methods,
         submitted_at=_isoformat(submitted_at),
         submitted_by=submitted_by,

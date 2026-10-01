@@ -2,7 +2,8 @@
 
     TEST_DATABASE_URL=postgresql+asyncpg://... python scripts/e2e.py [--slow]
 
-It migrates and truncates that database. --slow adds the hard-kill scenario (~75s more).
+It migrates and truncates that database, so its name must end in `_test`. --slow adds the
+hard-kill scenario (~75s more).
 """
 import argparse
 import asyncio
@@ -19,7 +20,6 @@ from pathlib import Path
 import aiohttp
 import asyncpg
 from aiohttp import web
-from dotenv import dotenv_values
 from sqlalchemy.engine import make_url
 
 REPO = Path(__file__).resolve().parent.parent
@@ -174,7 +174,8 @@ class Harness:
             sys.exit(f"alembic upgrade head failed:\n{r.stdout}{r.stderr}")
         conn = await asyncpg.connect(self.pg_dsn)
         try:
-            await conn.execute("TRUNCATE apps, scans, scan_events, services, urls, submissions CASCADE")
+            # Every other table hangs off apps.
+            await conn.execute("TRUNCATE apps CASCADE")
         finally:
             await conn.close()
 
@@ -236,9 +237,14 @@ class Harness:
             kill_tree(proc)
 
     async def scan(self, scan_id):
+        """The scan's status and error, and the worker that claimed its interceptor job."""
         conn = await asyncpg.connect(self.pg_dsn)
         try:
-            return await conn.fetchrow("SELECT status, error, worker_id FROM scans WHERE id=$1", scan_id)
+            return await conn.fetchrow(
+                "SELECT s.status, s.error, j.worker_id FROM scans s "
+                "LEFT JOIN scan_jobs j ON j.scan_id = s.id AND j.scanner = 'interceptor' WHERE s.id=$1",
+                scan_id,
+            )
         finally:
             await conn.close()
 
@@ -460,9 +466,9 @@ async def run(slow):
     sa_url = os.environ.get("TEST_DATABASE_URL")
     if not sa_url:
         sys.exit("Set TEST_DATABASE_URL to a disposable database; this script truncates it.")
-    dev_url = os.environ.get("DATABASE_URL") or dotenv_values(REPO / ".env").get("DATABASE_URL")
-    if sa_url == dev_url:
-        sys.exit("TEST_DATABASE_URL is DATABASE_URL; refusing to truncate it.")
+    name = make_url(sa_url).database or ""
+    if not name.endswith("_test"):
+        sys.exit(f"TEST_DATABASE_URL must name a database ending in '_test' (got {name!r}); refusing to truncate it.")
     busy = ports_in_use()
     if busy:
         sys.exit(f"Ports {busy} are in use; is an API or test site from an earlier run still up?")

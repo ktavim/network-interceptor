@@ -26,6 +26,17 @@ class Severity(str, Enum):
     cleared = "cleared"
 
 
+class ScanStatus(str, Enum):
+    """Derived from the scan's jobs (core.jobs.scan_status)."""
+    queued = "queued"
+    running = "running"
+    completed = "completed"
+    # At least one of the scan's jobs completed and the rest failed.
+    partial = "partial"
+    failed = "failed"
+    cancelled = "cancelled"
+
+
 class Scanner(str, Enum):
     interceptor = "interceptor"
     tracer = "tracer"

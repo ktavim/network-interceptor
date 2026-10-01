@@ -4,19 +4,21 @@ from datetime import datetime, timezone
 from typing import List
 
 from fastapi import APIRouter, HTTPException, Request, Response, status
-from sqlalchemy import case, func, select, update
+from sqlalchemy import case, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from core import jobs
 from core.db import (
     AppRow,
+    ScanJobRow,
     ScanRow,
     ServiceRow,
     SubmissionRow,
     UrlRow,
     select_services_with_evidence,
 )
-from core.enums import AuthMethod, Severity
+from core.enums import AuthMethod, JobStatus, Scanner, ScanStatus, Severity
 from core.events import emit_event
 from core.translate import severity_for
 
@@ -141,9 +143,17 @@ async def get_scan(scan_id: str, request: Request) -> ScanDetail:
                 func.coalesce(agg.c.auth_count, 0),
                 SubmissionRow.submitted_at,
                 SubmissionRow.submitted_by,
+                # Only the interceptor crawls pages; 0 until its job completes.
+                func.coalesce(ScanJobRow.pages_crawled, 0),
             )
             .outerjoin(agg, agg.c.scan_id == ScanRow.id)
             .outerjoin(SubmissionRow, SubmissionRow.scan_id == ScanRow.id)
+            # scan_jobs is UNIQUE on (scan_id, scanner): at most one row joins.
+            .outerjoin(
+                ScanJobRow,
+                (ScanJobRow.scan_id == ScanRow.id)
+                & (ScanJobRow.scanner == Scanner.interceptor.value),
+            )
             .where(ScanRow.id == scan_id)
         )
         row = (await session.execute(stmt)).first()
@@ -156,12 +166,14 @@ async def get_scan(scan_id: str, request: Request) -> ScanDetail:
             auth_count,
             submitted_at,
             submitted_by,
+            pages_crawled,
         ) = row
         return scan_to_detail(
             scan,
             blocker_count=int(blocker_count or 0),
             service_count=int(service_count or 0),
             auth_methods=int(auth_count or 0),
+            pages_crawled=int(pages_crawled or 0),
             submitted_at=submitted_at,
             submitted_by=submitted_by,
         )
@@ -231,16 +243,25 @@ async def create_scan(body: CreateScanRequest, request: Request) -> CreateScanRe
                 app_id=body.app_id,
                 name=name,
                 url=start_url,
-                status="queued",
+                status=ScanStatus.queued.value,
                 started_at=started_at,
                 started_by=started_by,
-                max_depth=body.max_depth,
-                pages_crawled=0,
+            )
+        )
+        session.add(
+            ScanJobRow(
+                id=uuid.uuid4().hex,
+                scan_id=scan_id,
+                scanner=Scanner.interceptor.value,
+                status=JobStatus.queued.value,
+                # None leaves the depth to the worker's config.json.
+                settings={"max_depth": body.max_depth},
+                created_at=started_at,
             )
         )
         # Same transaction as the scan, so no event can precede it.
         await emit_event(session, scan_id, "scan_started", {"url": start_url, "name": name})
-        # Committing the queued scan is the whole enqueue; a worker claims it.
+        # Committing the queued job is the whole enqueue; a worker claims it.
         await session.commit()
 
     return CreateScanResponse(scan_id=scan_id)
@@ -410,23 +431,10 @@ async def cancel_scan(scan_id: str, request: Request) -> Response:
         if not scan:
             raise HTTPException(status_code=404, detail={"message": "scan not found"})
 
-        # Conditional updates: a worker claiming the scan concurrently can't slip between them.
-        dequeued = await session.execute(
-            update(ScanRow)
-            .where(ScanRow.id == scan_id, ScanRow.status == "queued")
-            .values(status="cancelled", completed_at=func.now(), error="cancelled")
-            .execution_options(synchronize_session=False)
-        )
-        if dequeued.rowcount:
-            await emit_event(session, scan_id, "scan_failed", {"reason": "cancelled"})
-        else:
-            # The worker running it polls this, then ends the scan and emits scan_failed.
-            await session.execute(
-                update(ScanRow)
-                .where(ScanRow.id == scan_id, ScanRow.status == "running")
-                .values(cancel_requested_at=func.now())
-                .execution_options(synchronize_session=False)
-            )
+        # Queued jobs end here, and the scan with them if none is running. A
+        # worker running one polls the request, then ends its job; the scan
+        # ends, with scan_failed, when the last of them has.
+        await jobs.cancel(session, scan_id)
         await session.commit()
 
     return Response(status_code=status.HTTP_204_NO_CONTENT)

@@ -125,6 +125,12 @@ class TestUrlToRow:
         assert row["page_url"] == "https://app.example.com/page"
         assert row["id"]
 
+    def test_marks_the_row_as_the_interceptors(self):
+        row = url_to_row("service-1", _URL_ITEM)
+        assert row["scanner"] == "interceptor"
+        # Provenance strings are the tracer's; a captured request has page_url.
+        assert row["sources"] == []
+
     @pytest.mark.parametrize("tag, expected", [
         ("", AuthMethod.unknown),
         ("basic", AuthMethod.basic),
@@ -161,7 +167,7 @@ class TestUrlToRow:
             url_to_row("service-1", {"method": "GET"})
 
     def test_row_keys_match_the_table(self):
-        # worker.job does UrlRow(**row): an unknown key would TypeError, and a
+        # core.jobs does UrlRow(**row): an unknown key would TypeError, and a
         # missing one would silently fall back to the column default.
         row = url_to_row("service-1", _URL_ITEM)
         assert set(row) == set(UrlRow.__table__.columns.keys())
@@ -197,7 +203,7 @@ class TestServicesToRows:
         ]
 
     def test_service_row_has_no_urls_key(self):
-        # worker.job does ServiceRow(**row); an extra key would raise TypeError.
+        # core.jobs does ServiceRow(**row); an extra key would raise TypeError.
         service_rows, _ = services_to_rows("scan-1", [_service("a.com", [_URL_ITEM])])
         assert "urls" not in service_rows[0]
         assert set(service_rows[0]) == set(ServiceRow.__table__.columns.keys())

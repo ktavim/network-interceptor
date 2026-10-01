@@ -2,7 +2,7 @@
 import uuid
 from typing import Any, Dict, List, Tuple
 
-from .enums import AuthMethod, Severity
+from .enums import AuthMethod, Scanner, Severity
 
 
 def tag_to_auth_method(tag: str) -> AuthMethod:
@@ -57,7 +57,12 @@ def severity_for(auth_method: AuthMethod) -> Severity:
 
 
 def service_to_row(scan_id: str, service: Dict[str, Any]) -> Dict[str, Any]:
-    """Convert a single aggregate_by_origin entry into a ServiceRow-ready dict."""
+    """Convert a single aggregate_by_origin entry into a ServiceRow-ready dict.
+
+    The row is the service as the interceptor alone sees it. core.jobs stores
+    its verdict as the interceptor's finding for the origin and combines it
+    with the other scanner's.
+    """
     auth_method = tag_to_auth_method(service.get("authentication", ""))
     severity = severity_for(auth_method)
     return {
@@ -85,6 +90,7 @@ def url_to_row(service_id: str, item: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "id": uuid.uuid4().hex,
         "service_id": service_id,
+        "scanner": Scanner.interceptor.value,
         "method": item.get("method", "") or "",
         "url": item["url"],
         "resource_type": item.get("resource_type", "") or "",
@@ -95,6 +101,8 @@ def url_to_row(service_id: str, item: Dict[str, Any]) -> Dict[str, Any]:
         "auth_challenge": item.get("auth_challenge") or None,
         "redirect_url": item.get("redirect_url") or None,
         "page_url": item.get("page_url", "") or "",
+        # The tracer's provenance; a captured request's is its page_url.
+        "sources": [],
     }
 
 
