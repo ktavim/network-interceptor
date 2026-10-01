@@ -370,11 +370,7 @@ Recorded 2026-10-02:
   - An integration test runs both runners with stubbed engines (as config-tracer's worker tests do) and checks the merge, `partial`, submit refused on a partial scan, cancel mid-run, and a reaped job finalizing its scan.
   - On the step 0 target, every service whose combined verdict differs from the interceptor's finding has been read and makes sense (D4). This is the check of the cross-scanner order against real scans.
 
-### Step 6: Frontend
-
-- Show the `partial` state, job progress, `found_by`, each scanner's findings, and the new URL fields `scanner` and `sources`.
-
-### Step 7: Retire config-tracer
+### Step 6: Retire config-tracer
 
 - Stop config-tracer's API and worker, and remove the project.
 - `config_tracer_api` and `network-interceptor` stay as they are. They're the only record of what today's code decided for each origin, they cost nothing, and the new code can't run against them (step 3). Drop them whenever nobody needs the comparison anymore.
