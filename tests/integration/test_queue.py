@@ -361,41 +361,6 @@ async def test_cancel_is_a_no_op_on_a_finished_scan(factory):
     assert await _events(factory, scan_id) == []
 
 
-class _FakeMapper:
-    """Stands in for the crawler; map_website returns `result`, or blocks when it is None."""
-
-    result = None
-    started: asyncio.Event
-    config = None
-
-    def __init__(self, config, on_event=None):
-        _FakeMapper.config = config
-        self.on_event = on_event
-
-    async def initialize(self):
-        pass
-
-    async def map_website(self):
-        _FakeMapper.started.set()
-        if _FakeMapper.result is None:
-            await asyncio.sleep(3600)
-        for service in _FakeMapper.result["external_services"]:
-            await self.on_event("auth_detected", {"host": service["host"], "method": service["authentication"]})
-        return _FakeMapper.result
-
-    async def cleanup(self):
-        pass
-
-
-@pytest.fixture
-def fake_mapper(monkeypatch):
-    _FakeMapper.result = None
-    _FakeMapper.started = asyncio.Event()
-    _FakeMapper.config = None
-    monkeypatch.setattr("worker.job.Mapper", _FakeMapper)
-    return _FakeMapper
-
-
 async def _start_job(factory, scan_id, make_config, settings=None) -> Job:
     row = await _job(factory, scan_id)
     job = Job(ClaimedJob(row.id, scan_id, INTERCEPTOR, "http://x", settings or {"max_depth": None}))
@@ -478,7 +443,7 @@ async def test_job_that_raises_records_failure(factory, fake_mapper, make_config
     async def boom(self):
         raise RuntimeError("navigation exploded")
 
-    monkeypatch.setattr(_FakeMapper, "map_website", boom)
+    monkeypatch.setattr(fake_mapper, "map_website", boom)
     job = await _start_job(factory, scan_id, make_config)
     await asyncio.wait({job.task})
 
@@ -486,28 +451,6 @@ async def test_job_that_raises_records_failure(factory, fake_mapper, make_config
     scan = await _scan(factory, scan_id)
     assert (scan.status, scan.error) == ("failed", "RuntimeError: navigation exploded")
     assert await _event_types(factory, scan_id) == ["job_failed", "scan_failed"]
-
-
-class _FakePipeline:
-    """Stands in for the tracer's pipeline; run_scan returns `report`, or blocks when it is None."""
-
-    def __init__(self):
-        self.report = None
-        self.seeds = None
-        self.settings = None
-
-    async def run_scan(self, seeds, settings):
-        self.seeds, self.settings = seeds, settings
-        if self.report is None:
-            await asyncio.sleep(3600)
-        return self.report
-
-
-@pytest.fixture
-def fake_pipeline(monkeypatch):
-    pipeline = _FakePipeline()
-    monkeypatch.setattr("worker.job.run_scan", pipeline.run_scan)
-    return pipeline
 
 
 def _traced(host, verdict, urls, ips=()) -> ServiceReport:

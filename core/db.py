@@ -346,19 +346,42 @@ class ScanEventRow(Base):
     scan: Mapped[ScanRow] = relationship("ScanRow", back_populates="events")
 
 
-def select_services_with_evidence(scan_id: str):
-    """Select (ServiceRow, UrlRow | None) pairs: a scan's services, each with
-    the url row its evidence_url_id points at.
+async def load_services(
+    session: AsyncSession, scan_id: str, *, service_id: Optional[str] = None
+) -> list[tuple[ServiceRow, Optional[UrlRow], list[tuple[ServiceFindingRow, Optional[UrlRow]]]]]:
+    """A scan's services in origin order, or only the one with `service_id`.
 
-    An explicit outer join rather than a relationship: every read of a service
-    wants its evidence row, and a lazy relationship load inside an async
-    session raises MissingGreenlet. Callers add their own ordering.
+    Each comes as (service, evidence, findings): the url row the service's
+    evidence_url_id points at, or None, and each scanner's finding for it,
+    ordered by scanner and paired the same way with its own evidence row.
+
+    Explicit outer joins rather than relationships: every read of a service
+    wants these rows, and a lazy relationship load inside an async session
+    raises MissingGreenlet.
     """
-    return (
+    services = (
         select(ServiceRow, UrlRow)
         .outerjoin(UrlRow, UrlRow.id == ServiceRow.evidence_url_id)
         .where(ServiceRow.scan_id == scan_id)
+        .order_by(ServiceRow.host, ServiceRow.port, ServiceRow.scheme)
     )
+    findings = (
+        select(ServiceFindingRow, UrlRow)
+        .join(ServiceRow, ServiceRow.id == ServiceFindingRow.service_id)
+        .outerjoin(UrlRow, UrlRow.id == ServiceFindingRow.evidence_url_id)
+        .where(ServiceRow.scan_id == scan_id)
+        .order_by(ServiceFindingRow.scanner)
+    )
+    if service_id is not None:
+        services = services.where(ServiceRow.id == service_id)
+        findings = findings.where(ServiceRow.id == service_id)
+    by_service: dict[str, list[tuple[ServiceFindingRow, Optional[UrlRow]]]] = {}
+    for finding, evidence in (await session.execute(findings)).all():
+        by_service.setdefault(finding.service_id, []).append((finding, evidence))
+    return [
+        (service, evidence, by_service.get(service.id, []))
+        for service, evidence in (await session.execute(services)).all()
+    ]
 
 
 def _database_url() -> str:

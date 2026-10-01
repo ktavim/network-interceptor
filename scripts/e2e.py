@@ -379,13 +379,28 @@ async def happy_path(h, http, fast_app):
     check("scan completed by a worker", row["status"] == "completed" and row["worker_id"], f"{row['status']} {row['worker_id']}")
     completed = sorted(e["payload"]["scanner"] for e in events if e["type"] == "job_completed")
     check("a worker of each scanner completed its job", completed == ["interceptor", "tracer"], str(completed))
+    async with http.get(f"{API}/api/scans/{scan_id}") as r:
+        jobs = {j["scanner"]: j["status"] for j in (await r.json())["jobs"]}
+    check("the scan lists both jobs, completed", jobs == {"interceptor": "completed", "tracer": "completed"}, str(jobs))
     async with http.get(f"{API}/api/scans/{scan_id}/services") as r:
-        services = {(s["host"], s["port"]): (s["auth_method"], s["severity"]) for s in await r.json()}
+        listed = await r.json()
+    services = {(s["host"], s["port"]): (s["auth_method"], s["severity"]) for s in listed}
     check("services: Basic on 8803 blocks, 8802 clears",
           services.get(("127.0.0.1", 8803)) == ("basic", "blocker")
           and services.get(("127.0.0.1", 8802), ("", ""))[1] == "cleared", str(services))
     check("the tracer adds 8804, which only the config names",
           services.get(("127.0.0.1", 8804)) == ("unauthenticated", "cleared"), str(services))
+    found_by = {s["port"]: s["found_by"] for s in listed}
+    check("each service names the scanners that found it",
+          found_by == {8802: ["interceptor"], 8803: ["interceptor", "tracer"], 8804: ["tracer"]}, str(found_by))
+    merged = next((s for s in listed if s["port"] == 8803), {"id": "", "findings": []})
+    findings = {f["scanner"]: (f["auth_method"], f["evidence"]["resource_type"]) for f in merged["findings"]}
+    check("8803 keeps each scanner's finding and its evidence",
+          findings == {"interceptor": ("basic", "fetch"), "tracer": ("basic", "probe")}, str(findings))
+    async with http.get(f"{API}/api/scans/{scan_id}/services/{merged['id']}/urls?scanner=tracer") as r:
+        probes = [(u["scanner"], u["url"], u["sources"]) for u in await r.json()] if r.status == 200 else r.status
+    check("?scanner=tracer lists the probe alone, with where the URL was found",
+          probes == [("tracer", "http://127.0.0.1:8803/api", ["dom: inline script (window.__CONFIG__)"])], str(probes))
     n_events, n_ended = await asyncio.wait_for(notifications, 15)
     check("/notifications delivers scan_completed",
           n_ended == "terminal" and n_events[-1]["scan_id"] == scan_id and n_events[-1]["type"] == "scan_completed")
@@ -493,6 +508,13 @@ async def hard_kill(h, http, slow_app, baseline):
     check("with scan_completed, partial, failed_scanners interceptor",
           last_type == "scan_completed" and last_payload.get("partial") is True
           and last_payload.get("failed_scanners") == ["interceptor"], f"{last_type} {last_payload}")
+    async with http.post(f"{API}/api/scans/{scan_id}/submit") as r:
+        check("a partial scan cannot be submitted", r.status == 409, f"{r.status} {await r.text()}")
+    async with http.get(f"{API}/api/apps") as r:
+        app = next(a for a in await r.json() if a["id"] == slow_app)
+    check("its app reads as failed, to be rescanned",
+          (app["exposure_state"], app["last_scan_status"]) == ("failed", "partial"),
+          f"{app['exposure_state']} / {app['last_scan_status']}")
     await check_no_chromium_left("no Chromium orphaned by the kill", baseline)
 
 

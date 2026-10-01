@@ -5,7 +5,7 @@ from fastapi import APIRouter, HTTPException, Request
 from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from core.db import AppRow, ScanRow, ServiceRow, SubmissionRow, select_services_with_evidence
+from core.db import AppRow, ScanRow, ServiceRow, SubmissionRow, load_services
 from core.enums import AuthMethod, Severity
 
 from .models import (
@@ -166,10 +166,9 @@ async def list_app_scans(app_id: str, request: Request) -> List[ScanSummary]:
 
 async def _services_by_origin(session, scan_id: str) -> Dict[Tuple[str, str, int], Service]:
     # Keyed on the service's identity, the (scheme, host, port) origin.
-    pairs = (await session.execute(select_services_with_evidence(scan_id))).all()
     return {
-        (service.scheme, service.host, service.port): service_to_schema(service, evidence)
-        for service, evidence in pairs
+        (service.scheme, service.host, service.port): service_to_schema(service, evidence, findings)
+        for service, evidence, findings in await load_services(session, scan_id)
     }
 
 

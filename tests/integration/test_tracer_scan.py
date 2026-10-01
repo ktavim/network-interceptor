@@ -18,7 +18,7 @@ from api.routes_scans import create_scan, get_scan, list_service_urls, list_serv
 from config_tracer import pipeline
 from config_tracer.models import ConfigSource
 from config_tracer.settings import ScanSettings
-from core.db import AppRow, ScanJobRow, ServiceFindingRow, UrlRow
+from core.db import AppRow, ScanJobRow
 from core.enums import Scanner
 from core.jobs import claim_next
 from tests.tracer.conftest import auth_server, gated_auth_server, test_server  # noqa: F401
@@ -67,20 +67,6 @@ async def _urls(factory, scan_id, service) -> dict:
     return {u.url: u for u in await list_service_urls(scan_id, service.id, _request(factory))}
 
 
-async def _sources(factory, service_id) -> dict:
-    """{url: (scanner, sources)} of a service's url rows; the API does not show these yet."""
-    async with factory() as session:
-        rows = (await session.execute(select(UrlRow).where(UrlRow.service_id == service_id))).scalars()
-        return {row.url: (row.scanner, row.sources) for row in rows}
-
-
-async def _finding_scanners(factory, service_id) -> list:
-    async with factory() as session:
-        return (await session.execute(
-            select(ServiceFindingRow.scanner).where(ServiceFindingRow.service_id == service_id)
-        )).scalars().all()
-
-
 async def test_scan_of_the_config_fixture_finds_the_services_its_configs_name(factory, test_server, monkeypatch):  # noqa: F811
     # The fixture app names *.example.com hosts. Whether those resolve depends on
     # the network the tests run on, so the resolver is pinned to refuse them.
@@ -115,8 +101,8 @@ async def test_scan_of_the_config_fixture_finds_the_services_its_configs_name(fa
         assert service.evidence == listed
         assert (listed.url, listed.method, listed.resource_type) == (url, "", "probe")
         assert (listed.status_code, listed.failure_reason, listed.auth_method) == (0, "NXDOMAIN", "dns_failed")
-        assert await _sources(factory, service.id) == {url: ("tracer", [source])}
-        assert await _finding_scanners(factory, service.id) == ["tracer"]
+        assert (listed.scanner, listed.sources) == ("tracer", [source])
+        assert service.found_by == ["tracer"]
 
 
 async def test_scan_of_the_auth_fixture_gives_each_origin_its_probed_verdict(
@@ -164,7 +150,7 @@ async def test_scan_of_the_auth_fixture_gives_each_origin_its_probed_verdict(
         f"{auth_server}/auth/redirect-to": ("HEAD", 302, "unknown", gated_root),
     }
     assert all((u.resource_type, u.page_url, u.failure_reason) == ("probe", "", None) for u in urls.values())
-    sources = await _sources(factory, app.id)
+    sources = {url: (u.scanner, u.sources) for url, u in urls.items()}
     assert sources.pop(f"{auth_server}/") == ("tracer", [f"synthesized: {auth_server}/auth/forbidden"])
     assert len(sources) == 5 and all(found == ("tracer", [config]) for found in sources.values())
 
@@ -176,6 +162,4 @@ async def test_scan_of_the_auth_fixture_gives_each_origin_its_probed_verdict(
     assert gated.evidence == root
     assert (root.url, root.method, root.status_code) == (gated_root, "HEAD", 401)
     assert (root.auth_method, root.auth_challenge) == ("basic", 'Basic realm="gated"')
-    assert await _sources(factory, gated.id) == {
-        gated_root: ("tracer", [f"redirect: {auth_server}/auth/redirect-to"]),
-    }
+    assert (root.scanner, root.sources) == ("tracer", [f"redirect: {auth_server}/auth/redirect-to"])

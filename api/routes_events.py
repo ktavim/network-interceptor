@@ -36,7 +36,7 @@ async def scan_events(scan_id: str, request: Request):
     except (TypeError, ValueError):
         start_seq = 0
 
-    terminal = scan.status in ("completed", "failed", "cancelled")
+    terminal = scan.status in ("completed", "partial", "failed", "cancelled")
 
     # Subscribed before the first read, so no wake-up is missed in between.
     wake = asyncio.Event()

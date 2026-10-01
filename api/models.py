@@ -3,7 +3,7 @@ from typing import List, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from core.enums import AuthMethod, ScanStatus, Severity
+from core.enums import AuthMethod, JobStatus, Scanner, ScanStatus, Severity
 
 
 class ExposureState(str, Enum):
@@ -15,11 +15,14 @@ class ExposureState(str, Enum):
 
 
 class Url(BaseModel):
-    """One captured request behind a service."""
+    """One request behind a service: a request the browser made, captured by
+    the interceptor, or a probe the tracer sent."""
 
     model_config = ConfigDict(use_enum_values=True)
 
     id: str
+    # The scanner whose evidence this is.
+    scanner: Scanner
     method: str
     url: str
     resource_type: str
@@ -33,6 +36,22 @@ class Url(BaseModel):
     # the response was not a redirect.
     redirect_url: Optional[str] = None
     page_url: str
+    # Where the tracer found the URL: its provenance strings ("network:",
+    # "js:", "dom:", "redirect:", "synthesized:"). Empty for the interceptor,
+    # whose provenance is page_url.
+    sources: List[str] = Field(default_factory=list)
+
+
+class Finding(BaseModel):
+    """One scanner's own verdict for a service's origin."""
+
+    model_config = ConfigDict(use_enum_values=True)
+
+    scanner: Scanner
+    auth_method: AuthMethod
+    severity: Severity
+    # The request, one of this scanner's, whose classification is the verdict.
+    evidence: Optional[Url] = None
 
 
 class Service(BaseModel):
@@ -42,14 +61,20 @@ class Service(BaseModel):
     scheme: str
     host: str
     port: int
+    # The combined verdict of the scanners' findings (core.merge), until a
+    # person fills in one the scanners could not tell.
     auth_method: AuthMethod
     severity: Severity
     request_count: int
     ips: Optional[List[str]] = None
-    # The captured request whose authentication classification won for this
-    # origin. It is the service's evidence: status, page, challenge and
-    # redirect URL. None only for a service that has no such row.
+    # The request whose authentication classification won for this origin:
+    # the evidence of the finding that won the merge. It is the service's
+    # evidence: status, page, challenge and redirect URL. None only for a
+    # service that has no such row.
     evidence: Optional[Url] = None
+    # The scanners that found the origin, and each one's own verdict for it.
+    found_by: List[Scanner]
+    findings: List[Finding]
     excluded: bool
 
 
@@ -70,10 +95,26 @@ class ScanSummary(BaseModel):
     submitted_by: Optional[str] = None
 
 
+class ScanJob(BaseModel):
+    """One scanner's run of a scan."""
+
+    model_config = ConfigDict(use_enum_values=True)
+
+    scanner: Scanner
+    status: JobStatus
+    started_at: Optional[str] = None
+    completed_at: Optional[str] = None
+    error: Optional[str] = None
+    # None until the job completes, and for the tracer, which counts no pages.
+    pages_crawled: Optional[int] = None
+
+
 class ScanDetail(ScanSummary):
     duration_ms: Optional[int] = None
+    # The interceptor job's; 0 until it completes.
     pages_crawled: Optional[int] = None
     auth_methods_identified: Optional[int] = None
+    jobs: List[ScanJob]
 
 
 class ScanEvent(BaseModel):

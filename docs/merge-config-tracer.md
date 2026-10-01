@@ -1,6 +1,6 @@
 # Merging config-tracer into network-interceptor
 
-**Status:** proposal, 2026-09-30, revised 2026-10-01. Steps 1 to 3 (§7) are done, 2026-10-01, and step 4, 2026-10-02; no later step has started. The merged service runs on a fresh database, `f35`; the step 3 comparison scan there is `cd26d91452d74820ac5edb6f78cdd5c6` and the step 4 one is `f57ef053196e4eb1b3859592f5c72b8e`. Both existing databases hold only dev data; they stay in place, untouched, as the record of what today's code produced.
+**Status:** proposal, 2026-09-30, revised 2026-10-01. Steps 1 to 3 (§7) are done, 2026-10-01, and steps 4 and 5, 2026-10-02; step 6 has not started. The merged service runs on a fresh database, `f35`; the step 3 comparison scan there is `cd26d91452d74820ac5edb6f78cdd5c6`, the step 4 one is `f57ef053196e4eb1b3859592f5c72b8e` and the step 5 one is `41375e3065e7470f92c862f9935da605`. Both existing databases hold only dev data; they stay in place, untouched, as the record of what today's code produced.
 
 ## 1. Goal
 
@@ -72,7 +72,7 @@ worker/         __main__.py dispatches on WORKER_SCANNER; job.py has one runner 
 | `basic` | both | blocker | |
 | `other` | both | blocker | |
 | `negotiate` | both | review | |
-| `unknown` | tracer (interceptor: in theory only) | review | tracer: a bare 401, a coarse 4xx (400, 403, 404, 407) or a 5xx. interceptor: a tag outside the vocabulary, which no producer emits (`test_rank_table_has_no_tags_the_crawler_cannot_emit`), so in practice every `unknown` the merge sees is the tracer's. |
+| `unknown` | tracer (interceptor: in theory only) | review | tracer: a bare 401, a coarse 4xx (400, 403, 404, 407), a 5xx, or a redirect that isn't to a login or an IdP. interceptor: a tag outside the vocabulary, which no producer emits (`test_rank_table_has_no_tags_the_crawler_cannot_emit`), so in practice every `unknown` the merge sees is the tracer's. |
 | `no_response` | both | review | |
 | `dns_failed` | tracer | review | **New.** The interceptor reports a DNS failure as `no_response` with `failure_reason = net::ERR_NAME_NOT_RESOLVED`. |
 | `kerberos` | interceptor | cleared | |
@@ -369,6 +369,21 @@ Recorded 2026-10-02:
 - **Done when:**
   - An integration test runs both runners with stubbed engines (as config-tracer's worker tests do) and checks the merge, `partial`, submit refused on a partial scan, cancel mid-run, and a reaped job finalizing its scan.
   - On the step 0 target, every service whose combined verdict differs from the interceptor's finding has been read and makes sense (D4). This is the check of the cross-scanner order against real scans.
+
+Recorded 2026-10-02:
+
+- The merge and `partial` were already on: they came with `finalize_scan` in step 3 and have applied to two jobs since step 4. This step added the response fields of §6 (`jobs`, `found_by`, `findings`, `scanner`, `sources`, `?scanner=`) and the D1 line.
+- One fix beyond the list: `GET /api/scans/{id}/events` did not count `partial` as an ended scan, so a client resuming past the terminal event of a partial scan was sent keepalives for ever.
+- The services in a diff's `added` and `removed` carry `found_by` and `findings` too, as they are the same shape as a listed service.
+- The integration test is `tests/integration/test_both_scanners.py`. `scripts/e2e.py` checks the new fields, and with `--slow` that a partial scan can't be submitted and leaves its app `failed`.
+- The frontend change (§6) is not part of this step and has not been made.
+- The step 0 target check is scan `41375e3065e7470f92c862f9935da605`, with a worker of each scanner running: `completed` in 11:27 (the tracer job took 0:56), 7 pages, 26 services and 571 URLs.
+  - 12 services are the interceptor's alone, 8 the tracer's alone, and both found 6. Each scanner's own findings are what it found alone: the interceptor's 18 are the origins and verdicts of the step 3 scan, the tracer's 14 those of the step 4 scan.
+  - Of the 6 that both found, 4 agree (`unauthenticated`). The other 2 differ from the interceptor's finding, both by the one rule step 0 expected, a non-answer beating `unauthenticated`:
+    - `api.practicesoftwaretesting.com`: `unauthenticated` from 48 browser requests, `unknown` from the tracer's HEAD of the API base a bundle names, which answered 404. Combined: `unknown`, review. It reads right for another reason too: two of the 48 requests (`GET /users/me`, `POST /favorites`) got a 401 that names no scheme. The API takes a token after login, and the crawl wasn't logged in.
+    - `unsplash.com`: `unauthenticated` from 17 browser requests, all to the host's bot-challenge page and its static files. `unknown` from 20 probes of the photo-credit links in the products JSON: nine answered 200, ten redirected within the host (307, 308) and one answered 404. Combined: `unknown`, review. This is the cost D4 accepts, a review that `findings` settles.
+  - The 8 the tracer found alone take its verdict (§4.3, one finding): 3 `unauthenticated`, and 5 `unknown` from a 404 or a redirect (`cloudflareinsights.com`, `popper.js.org`, `jwt.io`, and `www.w3.org` on ports 80 and 443). They are links and XML namespaces that the bundles name and no page calls.
+  - So the interceptor alone has 18 services, all cleared, and the merged scan has 26: 19 cleared, 7 review, no blockers. Every review is a tracer `unknown`, and none argues for another order. What they show is how much review the tracer's `unknown` adds on a target with no blocker: it classes a 404, and any redirect that isn't to a login or an IdP, as `unknown`, which is its own detection logic and out of scope here (§1).
 
 ### Step 6: Retire config-tracer
 

@@ -1,7 +1,7 @@
 import logging
 import uuid
 from datetime import datetime, timezone
-from typing import List
+from typing import List, Optional
 
 from fastapi import APIRouter, HTTPException, Request, Response, status
 from sqlalchemy import case, func, select
@@ -17,7 +17,7 @@ from core.db import (
     ServiceRow,
     SubmissionRow,
     UrlRow,
-    select_services_with_evidence,
+    load_services,
 )
 from core.enums import AuthMethod, JobStatus, Scanner, ScanStatus, Severity
 from core.events import emit_event
@@ -92,6 +92,7 @@ async def _latest_completed_scan_id(session, app_id: str) -> str | None:
     Used by both submit (for eligibility) and patch_service (for the editability
     freeze). Failed/cancelled/running/queued scans don't count — they have no
     services to act on and shouldn't shadow an earlier valid completed scan.
+    Nor does a partial scan: a scanner's results are missing from its services.
     """
     return (
         await session.execute(
@@ -148,37 +149,28 @@ async def get_scan(scan_id: str, request: Request) -> ScanDetail:
                 func.coalesce(agg.c.auth_count, 0),
                 SubmissionRow.submitted_at,
                 SubmissionRow.submitted_by,
-                # Only the interceptor crawls pages; 0 until its job completes.
-                func.coalesce(ScanJobRow.pages_crawled, 0),
             )
             .outerjoin(agg, agg.c.scan_id == ScanRow.id)
             .outerjoin(SubmissionRow, SubmissionRow.scan_id == ScanRow.id)
-            # scan_jobs is UNIQUE on (scan_id, scanner): at most one row joins.
-            .outerjoin(
-                ScanJobRow,
-                (ScanJobRow.scan_id == ScanRow.id)
-                & (ScanJobRow.scanner == Scanner.interceptor.value),
-            )
             .where(ScanRow.id == scan_id)
         )
         row = (await session.execute(stmt)).first()
         if not row:
             raise HTTPException(status_code=404, detail={"message": "scan not found"})
-        (
-            scan,
-            blocker_count,
-            service_count,
-            auth_count,
-            submitted_at,
-            submitted_by,
-            pages_crawled,
-        ) = row
+        scan, blocker_count, service_count, auth_count, submitted_at, submitted_by = row
+        jobs = (
+            await session.execute(
+                select(ScanJobRow)
+                .where(ScanJobRow.scan_id == scan_id)
+                .order_by(ScanJobRow.scanner)
+            )
+        ).scalars().all()
         return scan_to_detail(
             scan,
             blocker_count=int(blocker_count or 0),
             service_count=int(service_count or 0),
             auth_methods=int(auth_count or 0),
-            pages_crawled=int(pages_crawled or 0),
+            jobs=jobs,
             submitted_at=submitted_at,
             submitted_by=submitted_by,
         )
@@ -191,17 +183,14 @@ async def list_services(scan_id: str, request: Request) -> List[Service]:
         scan = await session.get(ScanRow, scan_id)
         if not scan:
             raise HTTPException(status_code=404, detail={"message": "scan not found"})
-        pairs = (
-            await session.execute(
-                select_services_with_evidence(scan_id)
-                .order_by(ServiceRow.host, ServiceRow.port, ServiceRow.scheme)
-            )
-        ).all()
-        return [service_to_schema(service, evidence) for service, evidence in pairs]
+        return [service_to_schema(*loaded) for loaded in await load_services(session, scan_id)]
 
 
 @router.get("/scans/{scan_id}/services/{service_id}/urls", response_model=List[Url])
-async def list_service_urls(scan_id: str, service_id: str, request: Request) -> List[Url]:
+async def list_service_urls(
+    scan_id: str, service_id: str, request: Request, scanner: Optional[Scanner] = None
+) -> List[Url]:
+    """The service's urls from both scanners, or with `?scanner=` only that one's."""
     factory = _session_factory(request)
     async with factory() as session:
         service = await session.get(ServiceRow, service_id)
@@ -210,13 +199,10 @@ async def list_service_urls(scan_id: str, service_id: str, request: Request) -> 
         # Query the table directly rather than touching service.urls: a lazy
         # relationship load inside an async session raises MissingGreenlet.
         # Ids are random, so sort by (url, method) for a stable listing.
-        rows = (
-            await session.execute(
-                select(UrlRow)
-                .where(UrlRow.service_id == service_id)
-                .order_by(UrlRow.url, UrlRow.method)
-            )
-        ).scalars().all()
+        stmt = select(UrlRow).where(UrlRow.service_id == service_id)
+        if scanner is not None:
+            stmt = stmt.where(UrlRow.scanner == scanner.value)
+        rows = (await session.execute(stmt.order_by(UrlRow.url, UrlRow.method))).scalars().all()
         return [url_to_schema(r) for r in rows]
 
 
@@ -340,12 +326,9 @@ async def patch_service(
 
         await session.commit()
         await session.refresh(service)
-        evidence = (
-            await session.get(UrlRow, service.evidence_url_id)
-            if service.evidence_url_id
-            else None
-        )
-        return service_to_schema(service, evidence)
+        # The scanners' findings are untouched: only the combined verdict was filled in.
+        [loaded] = await load_services(session, scan_id, service_id=service_id)
+        return service_to_schema(*loaded)
 
 
 @router.post("/scans/{scan_id}/submit", response_model=SubmitScanResponse)
