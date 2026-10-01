@@ -221,7 +221,7 @@ What follows from this:
 
 - A `partial` scan can't be submitted. `submit_scan` already requires `completed`.
 - A `partial` scan doesn't count as the latest completed scan for editing, because `_latest_completed_scan_id` filters on `completed`.
-- `derive_exposure_state` treats `partial` like `failed` (D2).
+- `derive_exposure_state` treats `partial` like `failed` (D1).
 
 ## 5. Worker and queue
 
@@ -243,9 +243,9 @@ The lock order stays as `core/events.py` documents it: the scan row first, then 
 Runners in `worker/job.py`:
 
 - **interceptor:** today's `run_scan_job`. It writes a finding plus `urls` rows with `scanner='interceptor'`, instead of whole services.
-- **tracer:** `asyncio.wait_for(config_tracer.pipeline.run_scan([scans.url], ScanSettings(**job.settings)), timeout)`, then `translate.tracer_report_to_rows`, then the same write path. It emits `auth_detected` per service, as the interceptor does. It keeps config-tracer's hard timeout (900 s). The interceptor runner has no timeout today (D6).
+- **tracer:** `asyncio.wait_for(config_tracer.pipeline.run_scan([scans.url], ScanSettings(**job.settings)), timeout)`, then `translate.tracer_report_to_rows`, then the same write path. It emits `auth_detected` per service, as the interceptor does. It keeps config-tracer's hard timeout (900 s). The interceptor runner has no timeout today (D5).
 
-Retries: network-interceptor fails a job whose worker vanished, while config-tracer requeued such a job up to 3 attempts. The first version keeps network-interceptor's behavior. The `attempts` column is ready if retries are wanted later (D3).
+Retries: network-interceptor fails a job whose worker vanished, while config-tracer requeued such a job up to 3 attempts. The first version keeps network-interceptor's behavior. The `attempts` column is ready if retries are wanted later (D2).
 
 Events:
 
@@ -272,7 +272,7 @@ Everything is additive except the new status value.
 | `GET /api/scans/{id}` | Adds `jobs: [{scanner, status, started_at, completed_at, error, pages_crawled}]`. Top-level `pages_crawled` is the interceptor job's value. |
 | `GET /api/scans/{id}/services` | Each service adds `found_by` and `findings: [{scanner, auth_method, severity, evidence}]` |
 | `GET /api/scans/{id}/services/{sid}/urls` | Each URL adds `scanner` and `sources`. Optional `?scanner=` filter. |
-| `PATCH /api/scans/{id}/services/{sid}` | Unchanged. D4 decides whether `dns_failed` joins `unknown` and `no_response` as values a user can fill in. |
+| `PATCH /api/scans/{id}/services/{sid}` | Unchanged. D3 decides whether `dns_failed` joins `unknown` and `no_response` as values a user can fill in. |
 | `POST /api/scans/{id}/cancel` | Cancels queued jobs directly and flags running ones, then calls `finalize_scan` if every job has finished |
 | `GET /api/apps/{id}/diff` | Unchanged; it keys on origin. `found_by` changes could be added later. |
 | SSE | New event types (§5) |
@@ -353,9 +353,8 @@ Already decided: the merged service starts on a fresh database, and neither proj
 
 | # | Question | Recommendation |
 |---|---|---|
-| D1 | Should the tracer's crawl reuse the interceptor's login session (`storage_state`)? Without it, on an app behind SSO, the tracer sees only the login page's bundles. The probes stay anonymous either way. | Yes, after step 5: add a `storage_state` option to `config_tracer.crawl`. |
-| D2 | What exposure state does an app get when its latest scan is `partial`? | `failed`, meaning rerun. No new state. |
-| D3 | Retry a job whose worker died? | Not in the first version. The `attempts` column is ready. |
-| D4 | Can a user fill in the auth method of a `dns_failed` service? | Yes, for the same reason `unknown` and `no_response` allow it. |
-| D5 | Is the cross-scanner order in §4.3 right? In particular, the tracer's `no_response` outranks the interceptor's `unauthenticated`. | Yes. Review it against real scans during step 5. |
-| D6 | Should interceptor jobs get a hard timeout? | Yes, with the same setting the tracer runner uses. |
+| D1 | What exposure state does an app get when its latest scan is `partial`? | `failed`, meaning rerun. No new state. |
+| D2 | Retry a job whose worker died? | Not in the first version. The `attempts` column is ready. |
+| D3 | Can a user fill in the auth method of a `dns_failed` service? | Yes, for the same reason `unknown` and `no_response` allow it. |
+| D4 | Is the cross-scanner order in §4.3 right? In particular, the tracer's `no_response` outranks the interceptor's `unauthenticated`. | Yes. Review it against real scans during step 5. |
+| D5 | Should interceptor jobs get a hard timeout? | Yes, with the same setting the tracer runner uses. |
