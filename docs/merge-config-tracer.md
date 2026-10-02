@@ -1,6 +1,6 @@
 # Merging config-tracer into network-interceptor
 
-**Status:** proposal, 2026-09-30, revised 2026-10-01. Steps 1 to 3 (§7) are done, 2026-10-01, and steps 4 and 5, 2026-10-02; step 6 has not started. The merged service runs on a fresh database, `f35`; the step 3 comparison scan there is `cd26d91452d74820ac5edb6f78cdd5c6`, the step 4 one is `f57ef053196e4eb1b3859592f5c72b8e` and the step 5 one is `41375e3065e7470f92c862f9935da605`. Both existing databases hold only dev data; they stay in place, untouched, as the record of what today's code produced.
+**Status:** done, 2026-10-02. Proposed 2026-09-30, revised 2026-10-01. Steps 1 to 3 (§7) were done 2026-10-01, and steps 4 to 6, 2026-10-02. The merged service runs on a fresh database, `f35`; the step 3 comparison scan there is `cd26d91452d74820ac5edb6f78cdd5c6`, the step 4 one is `f57ef053196e4eb1b3859592f5c72b8e` and the step 5 one is `41375e3065e7470f92c862f9935da605`. Both existing databases hold only dev data; they stay in place, untouched, as the record of what today's code produced.
 
 ## 1. Goal
 
@@ -286,8 +286,6 @@ Everything is additive except the new status value.
 | `GET /api/apps/{id}/diff` | Unchanged; it keys on origin. `found_by` changes could be added later. |
 | SSE | New event types (§5) |
 
-The frontend has to handle `partial`, and should show `found_by` and each scanner's findings. Fields it doesn't know about break nothing.
-
 ## 7. Migration steps
 
 Each step leaves `main` working and can be tested on its own. The existing Alembic history is replaced by one new initial revision (step 3).
@@ -376,7 +374,6 @@ Recorded 2026-10-02:
 - One fix beyond the list: `GET /api/scans/{id}/events` did not count `partial` as an ended scan, so a client resuming past the terminal event of a partial scan was sent keepalives for ever.
 - The services in a diff's `added` and `removed` carry `found_by` and `findings` too, as they are the same shape as a listed service.
 - The integration test is `tests/integration/test_both_scanners.py`. `scripts/e2e.py` checks the new fields, and with `--slow` that a partial scan can't be submitted and leaves its app `failed`.
-- The frontend change (§6) is not part of this step and has not been made.
 - The step 0 target check is scan `41375e3065e7470f92c862f9935da605`, with a worker of each scanner running: `completed` in 11:27 (the tracer job took 0:56), 7 pages, 26 services and 571 URLs.
   - 12 services are the interceptor's alone, 8 the tracer's alone, and both found 6. Each scanner's own findings are what it found alone: the interceptor's 18 are the origins and verdicts of the step 3 scan, the tracer's 14 those of the step 4 scan.
   - Of the 6 that both found, 4 agree (`unauthenticated`). The other 2 differ from the interceptor's finding, both by the one rule step 0 expected, a non-answer beating `unauthenticated`:
@@ -389,7 +386,11 @@ Recorded 2026-10-02:
 
 - Stop config-tracer's API and worker, and remove the project.
 - `config_tracer_api` and `network-interceptor` stay as they are. They're the only record of what today's code decided for each origin, they cost nothing, and the new code can't run against them (step 3). Drop them whenever nobody needs the comparison anymore.
-- The test databases, `network-interceptor-test` and `config_tracer_api_test` if you created one, hold nothing. Drop them.
+
+Recorded 2026-10-02:
+
+- There was nothing to stop: no config-tracer API or worker was running, and no service or scheduled task starts one.
+- The project directory is deleted.
 
 ## 8. Decisions
 
