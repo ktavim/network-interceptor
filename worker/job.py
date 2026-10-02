@@ -13,7 +13,7 @@ from config_tracer.pipeline import run_scan
 from config_tracer.settings import ScanSettings
 from core.enums import JobStatus
 from core.events import emit_event_now
-from core.jobs import CANCELLED, ClaimedJob, finish
+from core.jobs import CANCELLED, ClaimedJob, finish, requeue
 from core.translate import services_to_rows, tracer_report_to_rows
 from crawler import Mapper
 
@@ -23,8 +23,6 @@ logger = logging.getLogger(__name__)
 USER = "user"
 SHUTDOWN = "shutdown"
 LEASE_LOST = "lease_lost"
-
-WORKER_SHUT_DOWN = "worker shut down"
 
 # What a scanner's run comes to: its service rows and url rows, in the shape
 # core.translate returns, and the pages it crawled (None if it counts none).
@@ -86,7 +84,8 @@ async def _record_interrupted(
     if reason == USER:
         await record_failure(session_factory, job_id, JobStatus.cancelled, CANCELLED)
     elif reason == SHUTDOWN:
-        await record_failure(session_factory, job_id, JobStatus.failed, WORKER_SHUT_DOWN)
+        # Not the job's failure: the next worker of its scanner runs it again.
+        await requeue(session_factory, job_id)
     # LEASE_LOST: the reaper already ended the job.
 
 

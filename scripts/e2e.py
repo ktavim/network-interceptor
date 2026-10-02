@@ -446,7 +446,7 @@ async def cancel_running(h, http, slow_app, finished_scan, baseline):
 
 
 async def graceful_shutdown(h, http, slow_app, baseline):
-    print("graceful shutdown of both workers mid-scan", flush=True)
+    print("graceful shutdown of both workers mid-scan, then new workers", flush=True)
     scan_id = await create_scan(http, slow_app)
     await h.wait_running(scan_id)
     tracer = await h.wait_job_claimed(scan_id, "tracer")
@@ -455,12 +455,24 @@ async def graceful_shutdown(h, http, slow_app, baseline):
     for name, (sent, how) in stops.items():
         code = await wait_exit(h.workers[name], 30)
         check(f"worker {name} exits cleanly within 30s", sent and code == 0, f"{how}, exit {code}")
-    error = "interceptor: worker shut down; tracer: worker shut down"
-    row = await h.scan(scan_id)
-    check("scan ends failed, both jobs worker shut down", (row["status"], row["error"]) == ("failed", error), f"{row['status']} / {row['error']}")
-    last = (await h.events(scan_id))[-1]
-    check("terminal event scan_failed with both errors", last[1:] == ("scan_failed", {"error": error}), str(last))
+    row, jobs = await h.scan(scan_id), await h.jobs(scan_id)
+    check("both jobs are back in the queue, the scan still running",
+          row["status"] == "running" and jobs == {"interceptor": ("queued", None), "tracer": ("queued", None)},
+          f"{row['status']} / {jobs}")
+    requeued = sorted(p["scanner"] for _, t, p in await h.events(scan_id) if t == "job_requeued")
+    check("each with a job_requeued event", requeued == ["interceptor", "tracer"], str(requeued))
     await check_no_chromium_left("no Chromium left after shutdown", baseline)
+    h.start_worker("A", 2)
+    h.start_worker("T", 2, scanner="tracer")
+    row = await h.wait_status(scan_id, ENDED, 150)
+    started = sorted(p["scanner"] for _, t, p in await h.events(scan_id) if t == "job_started")
+    check("new workers run both jobs again and the scan completes",
+          row["status"] == "completed" and started == ["interceptor", "interceptor", "tracer", "tracer"],
+          f"{row['status']} / started {started}")
+    # The next scenario starts with no worker running.
+    for name in ("A", "T"):
+        h.stop_worker_gracefully(name)
+        await wait_exit(h.workers[name], 30)
 
 
 async def shared_queue(h, http, fast_app):

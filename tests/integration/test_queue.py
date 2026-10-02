@@ -13,7 +13,7 @@ from config_tracer.settings import ScanSettings
 from core.db import AppRow, ScanEventRow, ScanJobRow, ScanRow, ServiceFindingRow, ServiceRow, UrlRow
 from core.enums import JobStatus, Scanner
 from core.events import emit_event_now
-from core.jobs import ClaimedJob, cancel, claim_next, finish, heartbeat, reap_stale, release
+from core.jobs import ClaimedJob, cancel, claim_next, finish, heartbeat, reap_stale, release, requeue
 from core.translate import services_to_rows
 from worker.job import LEASE_LOST, SHUTDOWN, USER, Job, run_interceptor_job, run_tracer_job
 
@@ -176,6 +176,33 @@ async def test_release_leaves_the_scan_running_while_another_job_runs(factory):
     await release(factory, claim.id)
     assert (await _job(factory, scan_id)).status == "queued"
     assert (await _scan(factory, scan_id)).status == "running"
+
+
+async def test_requeue_ends_the_job_instead_when_a_cancel_is_requested(factory):
+    # Requested after the worker's last heartbeat, so the worker knows only of its shutdown.
+    scan_id = await _add_scan(factory, status="running", cancel_requested_at=_now())
+
+    await requeue(factory, (await _job(factory, scan_id)).id)
+
+    job = await _job(factory, scan_id)
+    assert (job.status, job.error) == ("cancelled", "cancelled")
+    assert (await _scan(factory, scan_id)).status == "cancelled"
+    assert await _events(factory, scan_id) == [
+        (0, "job_failed", {"scanner": "interceptor", "error": "cancelled"}),
+        (1, "scan_failed", {"reason": "cancelled"}),
+    ]
+
+
+async def test_requeue_is_a_no_op_on_a_job_that_has_ended(factory):
+    # The reaper got there first, say: a shutdown that outlasted the lease.
+    scan_id = await _add_scan(factory, status="failed", error="worker lost")
+
+    await requeue(factory, (await _job(factory, scan_id)).id)
+
+    job = await _job(factory, scan_id)
+    assert (job.status, job.error) == ("failed", "worker lost")
+    assert await _events(factory, scan_id) == []
+    assert await claim_next(factory, INTERCEPTOR, "w") is None
 
 
 async def test_reaper_ends_stale_jobs_of_other_workers(factory):
@@ -373,10 +400,6 @@ async def _start_job(factory, scan_id, make_config, settings=None) -> Job:
         (0, "job_failed", {"scanner": "interceptor", "error": "cancelled"}),
         (1, "scan_failed", {"reason": "cancelled"}),
     ]),
-    (SHUTDOWN, "failed", "worker shut down", [
-        (0, "job_failed", {"scanner": "interceptor", "error": "worker shut down"}),
-        (1, "scan_failed", {"error": "worker shut down"}),
-    ]),
     (LEASE_LOST, "running", None, []),
 ])
 async def test_cancelled_job_records_its_reason(factory, fake_mapper, make_config, reason, status, error, events):
@@ -395,6 +418,33 @@ async def test_cancelled_job_records_its_reason(factory, fake_mapper, make_confi
     scan = await _scan(factory, scan_id)
     assert (scan.status, scan.error) == (status, error)
     assert await _events(factory, scan_id) == events
+
+
+async def test_job_stopped_by_a_shutdown_goes_back_to_the_front_of_the_queue(factory, fake_mapper, make_config):
+    scan_id = await _add_scan(factory, created_at=_now() - timedelta(hours=1))
+    await _add_scan(factory, created_at=_now())
+    claim = await claim_next(factory, INTERCEPTOR, "w1")
+    started_at = (await _scan(factory, scan_id)).started_at
+    job = Job(claim)
+    job.task = asyncio.create_task(run_interceptor_job(job, factory, make_config(), NO_TIMEOUT))
+    await fake_mapper.started.wait()
+
+    job.request_cancel(SHUTDOWN)
+    await asyncio.wait({job.task})
+
+    assert job.task.cancelled()
+    row = await _job(factory, scan_id)
+    assert (row.status, row.error, row.worker_id, row.heartbeat_at, row.started_at) == ("queued", None, None, None, None)
+    # The scan is still the one that started when its job was first claimed.
+    scan = await _scan(factory, scan_id)
+    assert (scan.status, scan.error, scan.started_at) == ("running", None, started_at)
+    assert await _events(factory, scan_id) == [
+        (0, "job_started", {"scanner": "interceptor"}),
+        (1, "job_requeued", {"scanner": "interceptor"}),
+    ]
+    # Ahead of the scan requested after it, and a second attempt.
+    assert (await claim_next(factory, INTERCEPTOR, "w2")).id == claim.id
+    assert (await _job(factory, scan_id)).attempts == 2
 
 
 async def test_completed_job_records_services_and_events(factory, fake_mapper, make_config):

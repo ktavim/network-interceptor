@@ -71,6 +71,8 @@ python -m worker
 
 A worker started without `WORKER_SCANNER`, or with any other value, exits with a message. Any number of workers of either kind can run against one database.
 
+Stopping a worker with Ctrl+C (or SIGTERM) puts the jobs it was running back in the queue, and the next worker of that scanner runs them again from the start. To stop a scan for good, cancel it.
+
 Interactive docs are at `http://127.0.0.1:8000/docs`.
 
 ## Run a scan

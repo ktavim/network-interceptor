@@ -31,7 +31,7 @@ from config_tracer.settings import ScanSettings
 from core.db import ScanEventRow, ScanJobRow
 from core.enums import Scanner
 from core.jobs import claim_next, heartbeat, reap_stale
-from worker.job import USER, Job, run_interceptor_job, run_tracer_job
+from worker.job import SHUTDOWN, USER, Job, run_interceptor_job, run_tracer_job
 
 # A scan timeout no test job reaches.
 NO_TIMEOUT = 3600
@@ -282,6 +282,46 @@ async def test_cancel_mid_run_ends_both_jobs_and_the_scan_once(factory, fake_map
     with pytest.raises(HTTPException) as refused:
         await submit_scan(scan_id, request)
     assert refused.value.status_code == 409
+
+
+async def test_job_requeued_by_a_worker_shutdown_is_run_again_and_the_scan_completes(factory, fake_mapper, fake_pipeline, start_job):
+    fake_pipeline.report = _trace()
+    scan_id = await _request_scan(factory)
+    await (await start_job(Scanner.tracer)).task
+    # The interceptor's worker shuts down mid-crawl.
+    stopped = await start_job(Scanner.interceptor)
+    await fake_mapper.started.wait()
+    stopped.request_cancel(SHUTDOWN)
+    await asyncio.wait({stopped.task})
+
+    # Its job waits for a worker again; the scan and the tracer's services stand.
+    request = _request(factory)
+    detail = await get_scan(scan_id, request)
+    assert detail.status == "running"
+    assert [(j.scanner, j.status, j.error) for j in detail.jobs] == [
+        ("interceptor", "queued", None),
+        ("tracer", "completed", None),
+    ]
+    assert detail.jobs[0].started_at is None
+    assert set(await _services(factory, scan_id)) == {"api.example", "legacy.example"}
+
+    # The next interceptor worker runs the job from the start, and the scan ends as if nothing had happened.
+    fake_mapper.result = _crawl()
+    await (await start_job(Scanner.interceptor)).task
+
+    detail = await get_scan(scan_id, request)
+    assert (detail.status, detail.service_count, detail.blocker_count) == ("completed", 3, 1)
+    assert [(j.scanner, j.status, j.error, j.pages_crawled) for j in detail.jobs] == [
+        ("interceptor", "completed", None, 4),
+        ("tracer", "completed", None, None),
+    ]
+    assert [t for t, _ in await _events(factory, scan_id)] == [
+        "scan_started",
+        "job_started", "auth_detected", "auth_detected", "job_completed",
+        "job_started", "job_requeued",
+        "job_started", "auth_detected", "auth_detected", "job_completed",
+        "blocker_found", "scan_completed",
+    ]
 
 
 async def test_reaped_job_ends_its_scan_with_the_other_scanners_results(factory, fake_pipeline, start_job):

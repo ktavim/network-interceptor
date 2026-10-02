@@ -145,6 +145,43 @@ async def release(session_factory: async_sessionmaker[AsyncSession], job_id: str
         await session.commit()
 
 
+async def requeue(session_factory: async_sessionmaker[AsyncSession], job_id: str) -> None:
+    """Put a running job back in the queue, to be run again from the start: its worker is shutting down.
+
+    The job keeps its created_at, so it is the next of its scanner's to be
+    claimed. Its scan stays running, unlike release's: the job did start, and
+    the scan keeps the started_at its duration counts from.
+
+    If a cancel is requested, the job ends as cancelled instead. The request
+    ended the scan's queued jobs when it was made, and would not see this one.
+    A cancel that commits while this runs can still miss it; the worker that
+    claims the job next then ends it at its first heartbeat.
+
+    A no-op if the job has already ended.
+    """
+    async with session_factory() as session:
+        job = (
+            await session.execute(
+                select(ScanJobRow.scan_id, ScanJobRow.scanner)
+                .where(ScanJobRow.id == job_id, ScanJobRow.status == _RUNNING)
+                .with_for_update(key_share=True)
+            )
+        ).first()
+        if job is None:
+            return
+        scan = await _lock_scan(session, job.scan_id)
+        if scan.cancel_requested_at is not None:
+            await finish(session, job_id, JobStatus.cancelled, error=CANCELLED)
+        else:
+            await session.execute(
+                _update_jobs()
+                .where(ScanJobRow.id == job_id)
+                .values(status=_QUEUED, started_at=None, worker_id=None, heartbeat_at=None)
+            )
+            await emit_event(session, job.scan_id, "job_requeued", {"scanner": job.scanner})
+        await session.commit()
+
+
 async def heartbeat(
     session_factory: async_sessionmaker[AsyncSession], job_ids: Sequence[str]
 ) -> Dict[str, Optional[datetime]]:
