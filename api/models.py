@@ -3,7 +3,7 @@ from typing import List, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from core.enums import AuthMethod, JobStatus, Scanner, ScanStatus, Severity
+from core.enums import AuthMethod, JobStatus, Scanner, ScanStatus, Severity, SourceKind
 
 
 class ExposureState(str, Enum):
@@ -42,6 +42,19 @@ class Url(BaseModel):
     sources: List[str] = Field(default_factory=list)
 
 
+class Source(BaseModel):
+    """One place a scanner found a service's origin: a tracer provenance
+    string (Url.sources) split into its kind and what it names, or a page the
+    interceptor's browser called the origin from (Url.page_url)."""
+
+    model_config = ConfigDict(use_enum_values=True)
+
+    kind: SourceKind
+    # The URL of the config, bundle, probed URL or page; for dom, the page
+    # element, in prose.
+    value: str
+
+
 class Finding(BaseModel):
     """One scanner's own verdict for a service's origin."""
 
@@ -75,6 +88,10 @@ class Service(BaseModel):
     # The scanners that found the origin, and each one's own verdict for it.
     found_by: List[Scanner]
     findings: List[Finding]
+    # Everywhere the scanners found the origin, folded over the service's urls
+    # (serialize.sources_to_schema): one entry per distinct source, sorted by
+    # kind then value.
+    sources: List[Source]
     excluded: bool
 
 

@@ -181,6 +181,13 @@ async def test_both_scanners_findings_come_back_as_one_list_of_services(factory,
     [finding] = services["legacy.example"].findings
     assert services["legacy.example"].evidence == finding.evidence
     assert finding.evidence.auth_challenge == 'Basic realm="reports"'
+    # Everywhere each origin was found: the bundle the tracer read it in, and the
+    # page the browser called it from, once, though two requests were made from it.
+    assert {host: [(s.kind, s.value) for s in service.sources] for host, service in services.items()} == {
+        "api.example": [("js", f"{APP_URL}/main.js"), ("page", f"{APP_URL}/")],
+        "cdn.example": [("page", f"{APP_URL}/")],
+        "legacy.example": [("js", f"{APP_URL}/main.js")],
+    }
 
     urls = await list_service_urls(scan_id, api.id, request)
     assert [(u.scanner, u.url, u.resource_type, u.page_url, u.sources) for u in urls] == [

@@ -105,7 +105,7 @@ All under `/api`, except `/health`.
 | `POST` | `/scans` | Start a scan (`app_id`, optional `max_depth`); returns `scan_id` |
 | `GET` | `/scans` | List scans |
 | `GET` | `/scans/{id}` | One scan, with `jobs`, one per scanner |
-| `GET` | `/scans/{id}/services` | Services, each with its combined verdict, `found_by` and each scanner's `findings` |
+| `GET` | `/scans/{id}/services` | Services, each with its combined verdict, `found_by`, each scanner's `findings`, and its `sources` |
 | `GET` | `/scans/{id}/services/{sid}/urls?scanner=` | A service's URL evidence, each row with its `scanner` and `sources` |
 | `PATCH` | `/scans/{id}/services/{sid}` | Exclude a service (`excluded`), or fill in an auth method the scanners couldn't tell (`auth_method`) |
 | `POST` | `/scans/{id}/submit` | Submit a completed scan |
@@ -114,6 +114,8 @@ All under `/api`, except `/health`.
 | `GET` | `/notifications` | Server-sent event stream across all scans |
 | `GET` | `/me` | The current user. A stub: there is no real auth flow. |
 | `GET` | `/health` | `{"status": "ok"}` |
+
+A service's `sources` is everywhere the scanners found its origin, folded over its URLs into one list of `{kind, value}`, deduplicated and sorted by kind then value. The tracer's kinds are `network`, `js` and `dom` (a config, bundle or page element that named a URL of the origin), `redirect` (a probed URL that redirected to it) and `synthesized` (the origin's root, which the tracer probed on its own after the URL named answered 4xx). `page` is the interceptor's: a page the browser called the origin from. The per-URL `sources` on `/urls` are the tracer's raw strings, one row at a time.
 
 ## Configuration
 

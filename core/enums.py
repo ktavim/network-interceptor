@@ -42,6 +42,24 @@ class Scanner(str, Enum):
     tracer = "tracer"
 
 
+class SourceKind(str, Enum):
+    """Where a scanner found a service's origin (api.models.Source). The first
+    five are the tracer's provenance kinds, the prefix of each string in
+    urls.sources; page is the interceptor's, a urls.page_url."""
+    # A config the page loaded, a JS bundle it loaded, or an element of the
+    # page, that named a URL of the origin.
+    network = "network"
+    js = "js"
+    dom = "dom"
+    # A probed URL whose redirect pointed at the origin.
+    redirect = "redirect"
+    # The origin's root, which the tracer probed on its own initiative after
+    # the URL named here answered 4xx.
+    synthesized = "synthesized"
+    # A page the interceptor's browser was on when it called the origin.
+    page = "page"
+
+
 class JobStatus(str, Enum):
     queued = "queued"
     running = "running"

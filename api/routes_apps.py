@@ -167,8 +167,8 @@ async def list_app_scans(app_id: str, request: Request) -> List[ScanSummary]:
 async def _services_by_origin(session, scan_id: str) -> Dict[Tuple[str, str, int], Service]:
     # Keyed on the service's identity, the (scheme, host, port) origin.
     return {
-        (service.scheme, service.host, service.port): service_to_schema(service, evidence, findings)
-        for service, evidence, findings in await load_services(session, scan_id)
+        (service.scheme, service.host, service.port): service_to_schema(service, evidence, findings, urls)
+        for service, evidence, findings, urls in await load_services(session, scan_id)
     }
 
 

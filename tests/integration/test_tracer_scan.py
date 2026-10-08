@@ -103,6 +103,8 @@ async def test_scan_of_the_config_fixture_finds_the_services_its_configs_name(fa
         assert (listed.status_code, listed.failure_reason, listed.auth_method) == (0, "NXDOMAIN", "dns_failed")
         assert (listed.scanner, listed.sources) == ("tracer", [source])
         assert service.found_by == ["tracer"]
+        kind, value = source.split(": ", 1)
+        assert [(s.kind, s.value) for s in service.sources] == [(kind, value)]
 
 
 async def test_scan_of_the_auth_fixture_gives_each_origin_its_probed_verdict(
@@ -153,6 +155,10 @@ async def test_scan_of_the_auth_fixture_gives_each_origin_its_probed_verdict(
     sources = {url: (u.scanner, u.sources) for url, u in urls.items()}
     assert sources.pop(f"{auth_server}/") == ("tracer", [f"synthesized: {auth_server}/auth/forbidden"])
     assert len(sources) == 5 and all(found == ("tracer", [config]) for found in sources.values())
+    # The service's sources fold its URLs': the config once, and what set off the root probe.
+    assert [(s.kind, s.value) for s in app.sources] == [
+        ("network", f"{auth_server}/config.json"), ("synthesized", f"{auth_server}/auth/forbidden"),
+    ]
 
     # The origin the redirect disclosed: a service of its own, with its own verdict.
     gated = services["127.0.0.1", gated_port]
@@ -163,3 +169,4 @@ async def test_scan_of_the_auth_fixture_gives_each_origin_its_probed_verdict(
     assert (root.url, root.method, root.status_code) == (gated_root, "HEAD", 401)
     assert (root.auth_method, root.auth_challenge) == ("basic", 'Basic realm="gated"')
     assert (root.scanner, root.sources) == ("tracer", [f"redirect: {auth_server}/auth/redirect-to"])
+    assert [(s.kind, s.value) for s in gated.sources] == [("redirect", f"{auth_server}/auth/redirect-to")]

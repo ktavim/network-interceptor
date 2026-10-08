@@ -348,12 +348,15 @@ class ScanEventRow(Base):
 
 async def load_services(
     session: AsyncSession, scan_id: str, *, service_id: Optional[str] = None
-) -> list[tuple[ServiceRow, Optional[UrlRow], list[tuple[ServiceFindingRow, Optional[UrlRow]]]]]:
+) -> list[
+    tuple[ServiceRow, Optional[UrlRow], list[tuple[ServiceFindingRow, Optional[UrlRow]]], list[UrlRow]]
+]:
     """A scan's services in origin order, or only the one with `service_id`.
 
-    Each comes as (service, evidence, findings): the url row the service's
-    evidence_url_id points at, or None, and each scanner's finding for it,
-    ordered by scanner and paired the same way with its own evidence row.
+    Each comes as (service, evidence, findings, urls): the url row the service's
+    evidence_url_id points at, or None; each scanner's finding for it, ordered
+    by scanner and paired the same way with its own evidence row; and every
+    url row of the service, in no order, for its sources.
 
     Explicit outer joins rather than relationships: every read of a service
     wants these rows, and a lazy relationship load inside an async session
@@ -372,14 +375,23 @@ async def load_services(
         .where(ServiceRow.scan_id == scan_id)
         .order_by(ServiceFindingRow.scanner)
     )
+    urls = (
+        select(UrlRow)
+        .join(ServiceRow, ServiceRow.id == UrlRow.service_id)
+        .where(ServiceRow.scan_id == scan_id)
+    )
     if service_id is not None:
         services = services.where(ServiceRow.id == service_id)
         findings = findings.where(ServiceRow.id == service_id)
+        urls = urls.where(ServiceRow.id == service_id)
     by_service: dict[str, list[tuple[ServiceFindingRow, Optional[UrlRow]]]] = {}
     for finding, evidence in (await session.execute(findings)).all():
         by_service.setdefault(finding.service_id, []).append((finding, evidence))
+    urls_by_service: dict[str, list[UrlRow]] = {}
+    for url in (await session.execute(urls)).scalars():
+        urls_by_service.setdefault(url.service_id, []).append(url)
     return [
-        (service, evidence, by_service.get(service.id, []))
+        (service, evidence, by_service.get(service.id, []), urls_by_service.get(service.id, []))
         for service, evidence in (await session.execute(services)).all()
     ]
 

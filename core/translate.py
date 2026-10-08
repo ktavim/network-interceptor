@@ -5,7 +5,7 @@ from urllib.parse import urljoin
 
 from config_tracer.report import ScanReport, ServiceReport, UrlEvidence
 
-from .enums import AuthMethod, Scanner, Severity
+from .enums import AuthMethod, Scanner, Severity, SourceKind
 
 # urls.resource_type of a tracer row: a probe the tracer sent, where an
 # interceptor row names what the browser was loading ("xhr", "script").
@@ -13,7 +13,7 @@ PROBE_RESOURCE_TYPE = "probe"
 
 # The tracer's provenance kinds that name a URL after the colon. "dom:" names
 # an element of the page instead.
-_URL_SOURCE_KINDS = ("network", "js", "redirect", "synthesized")
+_URL_SOURCE_KINDS = (SourceKind.network, SourceKind.js, SourceKind.redirect, SourceKind.synthesized)
 
 
 def tag_to_auth_method(tag: str) -> AuthMethod:
@@ -150,15 +150,34 @@ def _strip_url(url: str) -> str:
     return strip_url(url)
 
 
+def parse_source(source: str) -> Tuple[SourceKind, str]:
+    """A tracer provenance string, one of urls.sources, as (kind, what it
+    names): the URL of a config, bundle or probed URL, or for dom the page
+    element, in prose.
+
+    Strict, like the verdict in tracer_url_to_row: a string that names no kind
+    of the tracer's is a producer that drifted, and raises ValueError here, at
+    write time, rather than failing every read of its service's sources."""
+    kind, sep, named = source.partition(": ")
+    try:
+        parsed = SourceKind(kind) if sep else None
+    except ValueError:
+        parsed = None
+    # page is the interceptor's kind, never a stored string.
+    if parsed is None or parsed is SourceKind.page:
+        raise ValueError(f"tracer provenance outside the vocabulary: {source!r}")
+    return parsed, named
+
+
 def _strip_source(source: str) -> str:
     """A tracer provenance string with the URL it names stripped like urls.url.
 
     `redirect:` and `synthesized:` repeat a probed URL and `network:` and `js:`
     name a response the page loaded, so each can carry the query string that
     was stripped from the url column."""
-    kind, sep, url = source.partition(": ")
-    if sep and kind in _URL_SOURCE_KINDS:
-        return f"{kind}: {_strip_url(url)}"
+    kind, named = parse_source(source)
+    if kind in _URL_SOURCE_KINDS:
+        return f"{kind.value}: {_strip_url(named)}"
     return source
 
 
