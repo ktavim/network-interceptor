@@ -43,28 +43,31 @@ def tag_to_auth_method(tag: str) -> AuthMethod:
 def severity_for(auth_method: AuthMethod) -> Severity:
     """Severity of an origin's auth method for the F5 publish.
 
-    Read as a whitelist: only the named, supported schemes clear. A scheme
-    known to be unsupported (NTLM, Basic) blocks, and so does "other", a real
-    scheme the crawler could not name: not on the supported list means
-    unsupported until someone names it in the detector. Review is for what
+    A whitelist: only the named, supported schemes clear. A scheme known to
+    be unsupported (NTLM, Basic) blocks, and so does "other", a real scheme
+    the crawler could not name: not on the supported list means unsupported
+    until someone names it in the detector. Everything else is review, what
     cannot be told yet -- "negotiate" is SPNEGO whose mechanism (Kerberos or
     NTLM) went unresolved, "no_response" is an origin none of whose requests
     got an answer, "dns_failed" is an origin whose host the tracer could not
     resolve, and "unknown" is an answer that names no scheme: from the tracer
     a bare 401, a coarse 4xx or a 5xx, from the interceptor a producer that
     drifted from the vocabulary. The manual auth-method override exists to
-    fill in the last three.
+    fill in the last three. An AuthMethod added without a tier here lands on
+    review as well, in front of a human, rather than clearing unexamined.
     """
     if auth_method in (AuthMethod.ntlm, AuthMethod.basic, AuthMethod.other):
         return Severity.blocker
     if auth_method in (
-        AuthMethod.negotiate,
-        AuthMethod.no_response,
-        AuthMethod.dns_failed,
-        AuthMethod.unknown,
+        AuthMethod.kerberos,
+        AuthMethod.bearer,
+        AuthMethod.oauth,
+        AuthMethod.login_redirect,
+        AuthMethod.api_key,
+        AuthMethod.unauthenticated,
     ):
-        return Severity.review
-    return Severity.cleared
+        return Severity.cleared
+    return Severity.review
 
 
 def service_to_row(scan_id: str, service: Dict[str, Any]) -> Dict[str, Any]:

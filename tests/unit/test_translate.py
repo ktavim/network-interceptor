@@ -53,8 +53,9 @@ class TestSeverityFor:
         assert severity_for(auth_method) == Severity.cleared
 
     def test_every_auth_method_is_pinned(self):
-        # severity_for clears whatever it does not name, so a new AuthMethod
-        # has to be placed in a tier here before it can slip through as cleared.
+        # severity_for sends whatever it does not name to review, so a new
+        # AuthMethod has to be given a deliberate tier here rather than
+        # defaulting there.
         assert set(self.BLOCKERS + self.REVIEW + self.CLEARED) == set(AuthMethod)
 
 
