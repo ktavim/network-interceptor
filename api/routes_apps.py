@@ -13,6 +13,7 @@ from .models import (
     AuthMethodChange,
     CreateAppRequest,
     ExclusionChange,
+    PublishedChange,
     ScanDiff,
     ScanSummary,
     Service,
@@ -167,8 +168,10 @@ async def list_app_scans(app_id: str, request: Request) -> List[ScanSummary]:
 async def _services_by_origin(session, scan_id: str) -> Dict[Tuple[str, str, int], Service]:
     # Keyed on the service's identity, the (scheme, host, port) origin.
     return {
-        (service.scheme, service.host, service.port): service_to_schema(service, evidence, findings, urls)
-        for service, evidence, findings, urls in await load_services(session, scan_id)
+        (service.scheme, service.host, service.port): service_to_schema(
+            service, evidence, findings, urls, published_origin
+        )
+        for service, evidence, findings, urls, published_origin in await load_services(session, scan_id)
     }
 
 
@@ -202,11 +205,27 @@ async def app_diff(
     removed: list[Service] = [s for origin, s in a.items() if origin not in b]
     exclusion_changes: list[ExclusionChange] = []
     auth_method_changes: list[AuthMethodChange] = []
+    published_changes: list[PublishedChange] = []
     for origin, b_service in b.items():
         a_service = a.get(origin)
         if not a_service:
             continue
         scheme, host, port = origin
+        # The registry can change between two scans; the services' own
+        # verdicts show it as published coming or going.
+        a_published = a_service.severity == Severity.published.value
+        b_published = b_service.severity == Severity.published.value
+        if a_published != b_published:
+            published_changes.append(
+                PublishedChange(
+                    id=b_service.id,
+                    scheme=scheme,
+                    host=host,
+                    port=port,
+                    before=a_published,
+                    after=b_published,
+                )
+            )
         if a_service.excluded != b_service.excluded:
             exclusion_changes.append(
                 ExclusionChange(
@@ -237,4 +256,5 @@ async def app_diff(
         removed=removed,
         exclusion_changes=exclusion_changes,
         auth_method_changes=auth_method_changes,
+        published_changes=published_changes,
     )

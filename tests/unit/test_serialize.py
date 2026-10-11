@@ -1,7 +1,9 @@
 """Tests for api.serialize."""
-from api.serialize import sources_to_schema
-from core.db import UrlRow
-from core.enums import Scanner
+from datetime import datetime, timezone
+
+from api.serialize import published_origin_to_schema, service_to_schema, sources_to_schema
+from core.db import PublishedOriginRow, ServiceRow, UrlRow
+from core.enums import AuthMethod, Scanner, Severity
 
 
 def _url(scanner: Scanner, **fields) -> UrlRow:
@@ -14,6 +16,48 @@ def _url(scanner: Scanner, **fields) -> UrlRow:
 
 def _listed(sources) -> list[tuple[str, str]]:
     return [(source.kind, source.value) for source in sources]
+
+
+def _service(severity: Severity, **fields) -> ServiceRow:
+    """A service row with what service_to_schema reads. No session, so the
+    column defaults are given here."""
+    return ServiceRow(
+        id="svc", scheme="https", host="a.example", port=443,
+        auth_method=AuthMethod.ntlm.value, severity=severity.value,
+        request_count=1, ips=None, excluded=False, **fields,
+    )
+
+
+_ADDED = datetime(2026, 10, 9, 12, 0, tzinfo=timezone.utc)
+
+
+def _entry(**fields) -> PublishedOriginRow:
+    return PublishedOriginRow(
+        id="pub_1", scheme="https", host="a.example", port=443, note="vs_legacy",
+        added_by="jchen", added_at=_ADDED, **fields,
+    )
+
+
+class TestServiceToSchema:
+    def test_without_a_registry_entry(self):
+        service = service_to_schema(_service(Severity.blocker), None, [], [])
+        assert (service.severity, service.published_origin) == ("blocker", None)
+
+    def test_a_published_service_carries_its_entry(self):
+        service = service_to_schema(
+            _service(Severity.published, published_origin_id="pub_1"), None, [], [], _entry()
+        )
+        # The label is the scanners'; the severity is the registry's.
+        assert (service.auth_method, service.severity) == ("ntlm", "published")
+        entry = service.published_origin
+        assert (entry.id, entry.note, entry.added_by, entry.added_at, entry.removed_at, entry.removed_by) == (
+            "pub_1", "vs_legacy", "jchen", "2026-10-09T12:00:00+00:00", None, None,
+        )
+
+    def test_a_removed_entry_says_so(self):
+        removed = datetime(2026, 10, 10, tzinfo=timezone.utc)
+        entry = published_origin_to_schema(_entry(removed_at=removed, removed_by="jchen"))
+        assert (entry.removed_at, entry.removed_by) == ("2026-10-10T00:00:00+00:00", "jchen")
 
 
 class TestSourcesToSchema:

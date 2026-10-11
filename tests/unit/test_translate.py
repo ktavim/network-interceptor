@@ -58,6 +58,10 @@ class TestSeverityFor:
         # defaulting there.
         assert set(self.BLOCKERS + self.REVIEW + self.CLEARED) == set(AuthMethod)
 
+    def test_published_is_never_derived_from_a_method(self):
+        # Only the published-origins registry sets it (core.jobs).
+        assert Severity.published not in {severity_for(m) for m in AuthMethod}
+
 
 class TestTagToAuthMethod:
     def test_other_marker_maps_to_other(self):

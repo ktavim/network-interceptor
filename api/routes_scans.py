@@ -318,8 +318,11 @@ async def patch_service(
                 )
             service.auth_method = body.auth_method.value
             # Severity is derived from the auth method, so re-derive it using
-            # the same mapping the crawler uses (e.g. ntlm -> blocker).
-            service.severity = severity_for(body.auth_method).value
+            # the same mapping the crawler uses (e.g. ntlm -> blocker). Not
+            # for a service the published-origins registry published: its
+            # verdict stands whatever the label says.
+            if service.published_origin_id is None:
+                service.severity = severity_for(body.auth_method).value
 
         if body.excluded is not None:
             service.excluded = body.excluded

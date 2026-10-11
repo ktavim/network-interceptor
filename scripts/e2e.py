@@ -183,8 +183,8 @@ class Harness:
             sys.exit(f"alembic upgrade head failed:\n{r.stdout}{r.stderr}")
         conn = await asyncpg.connect(self.pg_dsn)
         try:
-            # Every other table hangs off apps.
-            await conn.execute("TRUNCATE apps CASCADE")
+            # Every other table hangs off apps, except the published-origins registry.
+            await conn.execute("TRUNCATE apps, published_origins CASCADE")
         finally:
             await conn.close()
 
@@ -407,6 +407,42 @@ async def happy_path(h, http, fast_app):
     return scan_id
 
 
+async def published_origin(h, http, fast_app):
+    """After happy_path, which saw 8803 block: registered as published, the next scan
+    publishes it, submits, and keeps that once the entry is removed."""
+    print("published origin", flush=True)
+    body = {"scheme": "http", "host": "127.0.0.1", "port": 8803, "note": "e2e"}
+    async with http.post(f"{API}/api/published-origins", json=body) as r:
+        entry = await r.json() if r.status == 201 else {}
+        check("registering an origin answers 201 with the entry",
+              r.status == 201 and entry.get("id", "").startswith("pub_") and entry.get("removed_at") is None, str(entry))
+    async with http.post(f"{API}/api/published-origins", json=body) as r:
+        check("registering it again is a 409", r.status == 409, str(r.status))
+    scan_id = await create_scan(http, fast_app)
+    row = await h.wait_status(scan_id, ENDED, 120)
+    check("the scan after the registration completes", row["status"] == "completed", str(row["status"]))
+    async with http.get(f"{API}/api/scans/{scan_id}/services") as r:
+        svc = next((s for s in await r.json() if s["port"] == 8803), {})
+    check("8803 is published, still basic, pointing at the entry",
+          (svc.get("auth_method"), svc.get("severity"), (svc.get("published_origin") or {}).get("id"))
+          == ("basic", "published", entry.get("id")), str(svc))
+    check("each scanner's own finding still says blocker",
+          [f["severity"] for f in svc.get("findings", [])] == ["blocker", "blocker"], str(svc.get("findings")))
+    events = await h.events(scan_id)
+    types = [t for _, t, _ in events]
+    check("no blocker_found, and scan_completed counts no blocker",
+          "blocker_found" not in types and types[-1] == "scan_completed" and events[-1][2]["blockers"] == 0, str(types))
+    async with http.post(f"{API}/api/scans/{scan_id}/submit") as r:
+        check("the scan submits", r.status == 200, await r.text())
+    async with http.delete(f"{API}/api/published-origins/{entry.get('id')}") as r:
+        check("removing the entry is a 204", r.status == 204, str(r.status))
+    async with http.get(f"{API}/api/scans/{scan_id}/services") as r:
+        svc = next((s for s in await r.json() if s["port"] == 8803), {})
+    check("the submitted scan keeps the verdict and sees the entry removed",
+          svc.get("severity") == "published" and (svc.get("published_origin") or {}).get("removed_at"),
+          str(svc.get("published_origin")))
+
+
 async def api_restart(h, http, slow_app):
     print("API restart mid-scan", flush=True)
     scan_id = await create_scan(http, slow_app)
@@ -569,6 +605,7 @@ async def run(slow):
         fast_app = await create_app(http, "/fast")
         slow_app = await create_app(http, "/slow")
         finished = await happy_path(h, http, fast_app)
+        await published_origin(h, http, fast_app)
         await api_restart(h, http, slow_app)
         await cancel_running(h, http, slow_app, finished, baseline)
         await graceful_shutdown(h, http, slow_app, baseline)

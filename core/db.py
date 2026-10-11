@@ -148,6 +148,44 @@ class ScanJobRow(Base):
     scan: Mapped[ScanRow] = relationship("ScanRow", back_populates="jobs")
 
 
+class PublishedOriginRow(Base):
+    """An origin already published through the F5, by a workaround the
+    scanners cannot see. One registry for every app: a service on the origin
+    is published, whatever its auth method, on every scan whose verdicts are
+    recomputed while the entry is active (core.jobs._recompute_services).
+    Scans completed before the entry keep their verdicts.
+
+    Removal is a soft delete. A service on a submitted scan keeps pointing at
+    the entry that published it, and a reader sees it was since removed.
+    """
+    __tablename__ = "published_origins"
+    __table_args__ = (
+        # One active entry per origin; re-adding after a removal is allowed.
+        Index(
+            "uq_published_origins_active",
+            "scheme",
+            "host",
+            "port",
+            unique=True,
+            postgresql_where=text("removed_at IS NULL"),
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    scheme: Mapped[str] = mapped_column(String, nullable=False)
+    host: Mapped[str] = mapped_column(String, nullable=False)
+    # The effective port, as services.port.
+    port: Mapped[int] = mapped_column(Integer, nullable=False)
+    # What publishes it: the virtual server, the workaround. For readers.
+    note: Mapped[str] = mapped_column(String, default="", nullable=False)
+    added_by: Mapped[str] = mapped_column(String, nullable=False)
+    added_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, nullable=False
+    )
+    removed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    removed_by: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+
+
 class ServiceRow(Base):
     """One external service a scan found: an origin the app calls, with its
     authentication classification and review state.
@@ -208,6 +246,19 @@ class ServiceRow(Base):
         nullable=True,
     )
     excluded: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    # The registry entry that made the service published (severity
+    # "published"): set by core.jobs._recompute_services, never by a person,
+    # and NULL under every other severity.
+    published_origin_id: Mapped[Optional[str]] = mapped_column(
+        String,
+        ForeignKey(
+            "published_origins.id",
+            ondelete="SET NULL",
+            name="fk_services_published_origin_id",
+        ),
+        index=True,
+        nullable=True,
+    )
 
     scan: Mapped[ScanRow] = relationship("ScanRow", back_populates="services")
     # foreign_keys is explicit because evidence_url_id is a second FK path
@@ -349,22 +400,30 @@ class ScanEventRow(Base):
 async def load_services(
     session: AsyncSession, scan_id: str, *, service_id: Optional[str] = None
 ) -> list[
-    tuple[ServiceRow, Optional[UrlRow], list[tuple[ServiceFindingRow, Optional[UrlRow]]], list[UrlRow]]
+    tuple[
+        ServiceRow,
+        Optional[UrlRow],
+        list[tuple[ServiceFindingRow, Optional[UrlRow]]],
+        list[UrlRow],
+        Optional[PublishedOriginRow],
+    ]
 ]:
     """A scan's services in origin order, or only the one with `service_id`.
 
-    Each comes as (service, evidence, findings, urls): the url row the service's
-    evidence_url_id points at, or None; each scanner's finding for it, ordered
-    by scanner and paired the same way with its own evidence row; and every
-    url row of the service, in no order, for its sources.
+    Each comes as (service, evidence, findings, urls, published_origin): the
+    url row the service's evidence_url_id points at, or None; each scanner's
+    finding for it, ordered by scanner and paired the same way with its own
+    evidence row; every url row of the service, in no order, for its sources;
+    and the registry entry its published_origin_id points at, or None.
 
     Explicit outer joins rather than relationships: every read of a service
     wants these rows, and a lazy relationship load inside an async session
     raises MissingGreenlet.
     """
     services = (
-        select(ServiceRow, UrlRow)
+        select(ServiceRow, UrlRow, PublishedOriginRow)
         .outerjoin(UrlRow, UrlRow.id == ServiceRow.evidence_url_id)
+        .outerjoin(PublishedOriginRow, PublishedOriginRow.id == ServiceRow.published_origin_id)
         .where(ServiceRow.scan_id == scan_id)
         .order_by(ServiceRow.host, ServiceRow.port, ServiceRow.scheme)
     )
@@ -391,8 +450,14 @@ async def load_services(
     for url in (await session.execute(urls)).scalars():
         urls_by_service.setdefault(url.service_id, []).append(url)
     return [
-        (service, evidence, by_service.get(service.id, []), urls_by_service.get(service.id, []))
-        for service, evidence in (await session.execute(services)).all()
+        (
+            service,
+            evidence,
+            by_service.get(service.id, []),
+            urls_by_service.get(service.id, []),
+            published_origin,
+        )
+        for service, evidence, published_origin in (await session.execute(services)).all()
     ]
 
 

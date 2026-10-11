@@ -24,6 +24,13 @@ class Severity(str, Enum):
     blocker = "blocker"
     review = "review"
     cleared = "cleared"
+    # Already published through the F5, by a workaround the scanners cannot
+    # see. Set only from the published-origins registry, in
+    # core.jobs._recompute_services, whatever the auth method says;
+    # translate.severity_for never returns it. Where cleared means the F5 can
+    # publish the origin and someone still has to, published means nothing
+    # is left to configure.
+    published = "published"
 
 
 class ScanStatus(str, Enum):

@@ -55,6 +55,8 @@ def severity_for(auth_method: AuthMethod) -> Severity:
     drifted from the vocabulary. The manual auth-method override exists to
     fill in the last three. An AuthMethod added without a tier here lands on
     review as well, in front of a human, rather than clearing unexamined.
+    Never "published": that comes from the published-origins registry
+    (core.jobs._recompute_services), not from a method.
     """
     if auth_method in (AuthMethod.ntlm, AuthMethod.basic, AuthMethod.other):
         return Severity.blocker
@@ -92,6 +94,8 @@ def service_to_row(scan_id: str, service: Dict[str, Any]) -> Dict[str, Any]:
         # Filled in by services_to_rows once the url rows have ids.
         "evidence_url_id": None,
         "excluded": False,
+        # Set by core.jobs._recompute_services from the registry.
+        "published_origin_id": None,
     }
 
 
@@ -242,6 +246,8 @@ def _tracer_service_to_row(scan_id: str, service: ServiceReport) -> Dict[str, An
         # Filled in by tracer_report_to_rows once the url rows have ids.
         "evidence_url_id": None,
         "excluded": False,
+        # Set by core.jobs._recompute_services from the registry.
+        "published_origin_id": None,
     }
 
 

@@ -112,10 +112,14 @@ All under `/api`, except `/health`.
 | `POST` | `/scans/{id}/cancel` | Cancel a scan |
 | `GET` | `/scans/{id}/events` | The scan's events as a server-sent event stream; resumes from `Last-Event-ID` |
 | `GET` | `/notifications` | Server-sent event stream across all scans |
+| `GET`, `POST` | `/published-origins` | Origins already published through the F5 (`?include_removed=true` adds removed ones); register one (`scheme`, `host`, `port`, `note`) |
+| `DELETE` | `/published-origins/{id}` | Remove a registration. Scans completed while it was active keep their verdicts |
 | `GET` | `/me` | The current user. A stub: there is no real auth flow. |
 | `GET` | `/health` | `{"status": "ok"}` |
 
 A service's `sources` is everywhere the scanners found its origin, folded over its URLs into one list of `{kind, value}`, deduplicated and sorted by kind then value. The tracer's kinds are `network`, `js` and `dom` (a config, bundle or page element that named a URL of the origin), `redirect` (a probed URL that redirected to it) and `synthesized` (the origin's root, which the tracer probed on its own after the URL named answered 4xx). `page` is the interceptor's: a page the browser called the origin from. The per-URL `sources` on `/urls` are the tracer's raw strings, one row at a time.
+
+A service's `severity` is `blocker`, `review` or `cleared`, derived from its `auth_method`, or `published`: the origin is already published through the F5, by a workaround the scanners cannot see, so nothing is left to configure, where `cleared` means the F5 can publish it and someone still has to. `published` comes only from the published-origins registry, one list for every app keyed by scheme, host and port, and it overrides whatever method was detected, so a service can read `ntlm` with `published`; its `published_origin` names the entry, and each scanner's `findings` keep the severity its own method implies. The registry is read when a scan's verdicts are computed, as each of its jobs ends. A scan completed before an entry was added or removed keeps its verdicts; rescan to see the change. Removing an entry is a soft delete: a service on a submitted scan keeps pointing at the entry, with its `removed_at` set.
 
 ## Configuration
 

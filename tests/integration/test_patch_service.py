@@ -8,12 +8,13 @@ from fastapi import HTTPException
 
 from api.models import PatchServiceRequest
 from api.routes_scans import patch_service
-from core.db import AppRow, ScanRow, ServiceRow
+from core.db import AppRow, PublishedOriginRow, ScanRow, ServiceRow
 from core.enums import AuthMethod, Severity
 
 
-async def _add_service(factory, auth_method: AuthMethod, severity: Severity) -> tuple:
-    """A service on an app's only completed scan, so it is editable."""
+async def _add_service(factory, auth_method: AuthMethod, severity: Severity, **fields) -> tuple:
+    """A service on an app's only completed scan, so it is editable. `fields`
+    are further columns of the service row."""
     app_id, scan_id, service_id = uuid.uuid4().hex, uuid.uuid4().hex, uuid.uuid4().hex
     async with factory() as session:
         session.add(AppRow(id=app_id, name="app", url="http://x", owner_ad_group="g"))
@@ -24,7 +25,7 @@ async def _add_service(factory, auth_method: AuthMethod, severity: Severity) -> 
         await session.flush()
         session.add(ServiceRow(
             id=service_id, scan_id=scan_id, scheme="https", host="a.com", port=443,
-            auth_method=auth_method.value, severity=severity.value,
+            auth_method=auth_method.value, severity=severity.value, **fields,
         ))
         await session.commit()
     return scan_id, service_id
@@ -59,3 +60,20 @@ async def test_detected_method_stays_locked(factory):
     with pytest.raises(HTTPException) as e:
         await _patch(factory, scan_id, service_id, AuthMethod.ntlm)
     assert e.value.status_code == 409
+
+
+async def test_a_published_service_keeps_its_severity_when_filled_in(factory):
+    # The registry's verdict stands whatever the label says; only the label changes.
+    entry_id = "pub_" + uuid.uuid4().hex[:10]
+    async with factory() as session:
+        session.add(PublishedOriginRow(
+            id=entry_id, scheme="https", host="a.com", port=443, note="", added_by="test",
+        ))
+        await session.commit()
+    scan_id, service_id = await _add_service(
+        factory, AuthMethod.unknown, Severity.published, published_origin_id=entry_id
+    )
+    service = await _patch(factory, scan_id, service_id, AuthMethod.ntlm)
+    assert (service.auth_method, service.severity, service.published_origin.id) == (
+        "ntlm", "published", entry_id,
+    )

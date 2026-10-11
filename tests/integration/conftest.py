@@ -53,8 +53,8 @@ def migrated_db(db_url: str) -> str:
 async def factory(migrated_db: str):
     engine = create_async_engine(migrated_db)
     async with engine.begin() as conn:
-        # Every other table hangs off apps.
-        await conn.execute(text("TRUNCATE apps CASCADE"))
+        # Every other table hangs off apps, except the published-origins registry.
+        await conn.execute(text("TRUNCATE apps, published_origins CASCADE"))
     yield async_sessionmaker(engine, expire_on_commit=False)
     await engine.dispose()
 

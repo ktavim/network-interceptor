@@ -14,7 +14,7 @@ from typing import Any, Dict, List, Optional, Sequence
 from sqlalchemy import Row, case, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from .db import ScanJobRow, ScanRow, ServiceFindingRow, ServiceRow, UrlRow
+from .db import PublishedOriginRow, ScanJobRow, ScanRow, ServiceFindingRow, ServiceRow, UrlRow
 from .enums import AuthMethod, JobStatus, Scanner, ScanStatus, Severity
 from .events import emit_event
 from .merge import Finding, merge_findings
@@ -427,7 +427,14 @@ async def _record_findings(
 
 
 async def _recompute_services(session: AsyncSession, scan_id: str) -> List[ServiceRow]:
-    """Set each of the scan's services to the combined verdict of its findings; returns the services."""
+    """Set each of the scan's services to the combined verdict of its findings; returns the services.
+
+    Then the published-origins registry: a service whose origin has an active
+    entry is published, whatever the merge found, and points at the entry.
+    The registry is read here, once per job end, so a scan takes it as it
+    stands when its verdicts are last recomputed, and a completed scan keeps
+    its verdicts whatever is added or removed later.
+    """
     rows = (
         await session.execute(
             select(ServiceRow, ServiceFindingRow)
@@ -439,6 +446,14 @@ async def _recompute_services(session: AsyncSession, scan_id: str) -> List[Servi
     findings: Dict[ServiceRow, List[ServiceFindingRow]] = {}
     for service, finding in rows:
         findings.setdefault(service, []).append(finding)
+    published = {
+        (entry.scheme, entry.host, entry.port): entry
+        for entry in (
+            await session.execute(
+                select(PublishedOriginRow).where(PublishedOriginRow.removed_at.is_(None))
+            )
+        ).scalars()
+    }
     for service, own in findings.items():
         # No scanner's addresses are kept apart; the service's are the union. That is exact
         # where the merge reads has_ips, to drop a tracer dns_failed: the tracer resolved
@@ -453,7 +468,13 @@ async def _recompute_services(session: AsyncSession, scan_id: str) -> List[Servi
             for f in own
         )
         service.auth_method = verdict.auth_method.value
-        service.severity = verdict.severity.value
         service.evidence_url_id = verdict.evidence_url_id
         service.request_count = sum(f.url_count for f in own)
+        entry = published.get((service.scheme, service.host, service.port))
+        if entry is not None:
+            service.severity = Severity.published.value
+            service.published_origin_id = entry.id
+        else:
+            service.severity = verdict.severity.value
+            service.published_origin_id = None
     return list(findings)

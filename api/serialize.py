@@ -2,7 +2,15 @@
 from datetime import datetime, timezone
 from typing import List, Optional, Sequence, Tuple
 
-from core.db import AppRow, ScanJobRow, ScanRow, ServiceFindingRow, ServiceRow, UrlRow
+from core.db import (
+    AppRow,
+    PublishedOriginRow,
+    ScanJobRow,
+    ScanRow,
+    ServiceFindingRow,
+    ServiceRow,
+    UrlRow,
+)
 from core.enums import AuthMethod, JobStatus, Scanner, Severity, SourceKind
 from core.translate import parse_source, severity_for
 
@@ -10,6 +18,7 @@ from .models import (
     AppSummary,
     ExposureState,
     Finding,
+    PublishedOrigin,
     ScanDetail,
     ScanJob,
     ScanStatus,
@@ -39,16 +48,33 @@ def finding_to_schema(row: ServiceFindingRow, evidence: UrlRow | None) -> Findin
     )
 
 
+def published_origin_to_schema(row: PublishedOriginRow) -> PublishedOrigin:
+    return PublishedOrigin(
+        id=row.id,
+        scheme=row.scheme,
+        host=row.host,
+        port=row.port,
+        note=row.note,
+        added_by=row.added_by,
+        added_at=_isoformat(row.added_at),
+        removed_at=_isoformat(row.removed_at),
+        removed_by=row.removed_by,
+    )
+
+
 def service_to_schema(
     row: ServiceRow,
     evidence: UrlRow | None,
     findings: Sequence[Tuple[ServiceFindingRow, UrlRow | None]],
     urls: Sequence[UrlRow],
+    published_origin: PublishedOriginRow | None = None,
 ) -> Service:
     """`evidence` is the url row `row.evidence_url_id` points at, or None when it
     points nowhere. `findings` is each scanner's finding for the service with
     the url row its own evidence_url_id points at. `urls` is every url row of
-    the service. The caller loads them (db.load_services)."""
+    the service. `published_origin` is the registry entry
+    `row.published_origin_id` points at, or None. The caller loads them
+    (db.load_services)."""
     return Service(
         id=row.id,
         scheme=row.scheme,
@@ -63,6 +89,9 @@ def service_to_schema(
         findings=[finding_to_schema(finding, url) for finding, url in findings],
         sources=sources_to_schema(urls),
         excluded=row.excluded,
+        published_origin=(
+            published_origin_to_schema(published_origin) if published_origin is not None else None
+        ),
     )
 
 
