@@ -1,11 +1,13 @@
 """Wire Playwright page/context events to the NetworkInterceptor, deduplicating by (method, URL)."""
 import logging
 from functools import partial
+from typing import Optional
 
 from playwright.async_api import BrowserContext, Page
 
 from ..origin import origin_of
 from .interceptor import NetworkInterceptor
+from .write_guard import BLOCKED_FAILURE_REASON, WriteGuard
 
 logger = logging.getLogger(__name__)
 
@@ -13,9 +15,10 @@ logger = logging.getLogger(__name__)
 class RequestCapture:
     """Bridge Playwright events to NetworkInterceptor with de-duplication."""
 
-    def __init__(self, interceptor: NetworkInterceptor, start_url: str):
+    def __init__(self, interceptor: NetworkInterceptor, start_url: str, write_guard: Optional[WriteGuard] = None):
         self.interceptor = interceptor
         self.start_origin = origin_of(start_url)
+        self.write_guard = write_guard
         self.pending_requests: dict = {}
         self.captured_keys: set = set()
         # Keys whose only record so far is a failed request, mapped to that
@@ -97,10 +100,14 @@ class RequestCapture:
         if request_data is None:
             request_data = await self.interceptor.handle_request(request, page.url)
 
-        failure = request.failure
+        if self.write_guard is not None and self.write_guard.was_blocked(request):
+            failure = BLOCKED_FAILURE_REASON
+        else:
+            failure = request.failure
         logger.debug("Request failed for %s %s: %s", request.method, request.url, failure)
         request_data['status'] = 0
-        # The browser's error text, e.g. "net::ERR_NAME_NOT_RESOLVED".
+        # The browser's error text, e.g. "net::ERR_NAME_NOT_RESOLVED", or
+        # BLOCKED_FAILURE_REASON for a write the guard aborted.
         request_data['failure_reason'] = failure
         # "unauthenticated" is a claim that the server answered a bare request,
         # which a failure cannot back. A scheme the request sent is still what

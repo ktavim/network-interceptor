@@ -3,6 +3,8 @@ import os
 from typing import Dict, Optional
 from dataclasses import dataclass
 
+WRITE_POLICIES = ("block", "allow")
+
 
 @dataclass
 class FormConfig:
@@ -41,10 +43,21 @@ class Config:
     form_filling: FormConfig = None
     exclude_patterns: list = None
     login: Optional[LoginConfig] = None
+    # "block" aborts state-changing requests (see crawler.network.write_guard);
+    # "allow" lets the crawl submit forms, for an app whose data is disposable.
+    write_policy: str = "block"
+    # URL substrings whose state-changing requests are let through under "block".
+    allow_write_patterns: list = None
 
     def __post_init__(self):
         if self.exclude_patterns is None:
             self.exclude_patterns = ["logout", "delete", "remove", "login", "signin"]
+        if self.allow_write_patterns is None:
+            self.allow_write_patterns = []
+        if self.write_policy not in WRITE_POLICIES:
+            raise ValueError(
+                f"write_policy must be one of {', '.join(WRITE_POLICIES)}, got {self.write_policy!r}"
+            )
 
 
 def _resolve_login(data: dict) -> Optional[LoginConfig]:
@@ -100,4 +113,6 @@ def load_config(config_path: str) -> Config:
         form_filling=form_config,
         exclude_patterns=data.get('exclude_patterns'),
         login=_resolve_login(data),
+        write_policy=data.get('write_policy', 'block'),
+        allow_write_patterns=data.get('allow_write_patterns'),
     )

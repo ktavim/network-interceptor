@@ -30,6 +30,41 @@ class TestInit:
         assert m.page is None
 
 
+def _fake_playwright():
+    calls = []
+    context = MagicMock()
+    context.route = AsyncMock(side_effect=lambda *a: calls.append("route"))
+    context.new_page = AsyncMock(side_effect=lambda: calls.append("new_page") or MagicMock())
+    browser = MagicMock()
+    browser.new_context = AsyncMock(return_value=context)
+    pw = MagicMock()
+    pw.chromium.launch = AsyncMock(return_value=browser)
+    starter = MagicMock()
+    starter.start = AsyncMock(return_value=pw)
+    return starter, browser, context, calls
+
+
+class TestInitialize:
+    async def test_guard_is_routed_before_the_first_page(self, make_config):
+        starter, browser, context, calls = _fake_playwright()
+        m = Mapper(make_config())
+        with patch("crawler.mapper.async_playwright", return_value=starter):
+            await m.initialize()
+
+        assert calls == ["route", "new_page"]
+        assert browser.new_context.call_args.kwargs["service_workers"] == "block"
+        assert m._capture.write_guard is m.write_guard
+
+    async def test_allow_policy_leaves_the_context_unguarded(self, make_config):
+        starter, browser, context, calls = _fake_playwright()
+        m = Mapper(make_config(write_policy="allow"))
+        with patch("crawler.mapper.async_playwright", return_value=starter):
+            await m.initialize()
+
+        assert calls == ["new_page"]
+        assert "service_workers" not in browser.new_context.call_args.kwargs
+
+
 class TestMapWebsite:
     async def test_returns_empty_when_navigation_fails(self, make_config):
         m = Mapper(make_config())
@@ -134,6 +169,49 @@ class TestEnsureAuthenticated:
         with patch("crawler.mapper.perform_login", AsyncMock()) as pl:
             await m._ensure_authenticated(page)
             pl.assert_called_once_with(page, cfg.login, cfg.start_url)
+
+    async def test_writes_are_allowed_only_while_logging_in(self, make_config, mock_request):
+        from config_loader import LoginConfig
+        cfg = make_config()
+        cfg.login = LoginConfig(login_url="http://x/login", username="u", password="p")
+        m = Mapper(cfg)
+        page = MagicMock()
+        page.url = "http://x/login"
+        form_post = mock_request(method="POST", url="http://localhost:8080/api/items")
+        allowed_during_login = []
+
+        async def login(*args):
+            allowed_during_login.append(m.write_guard.is_allowed(form_post))
+
+        with patch("crawler.mapper.perform_login", AsyncMock(side_effect=login)):
+            await m._ensure_authenticated(page)
+
+        assert allowed_during_login == [True]
+        assert m.write_guard.is_allowed(form_post) is False
+
+    async def test_login_retry_also_runs_with_writes_allowed(self, make_config, mock_request, tmp_path):
+        from config_loader import LoginConfig
+        cfg = make_config()
+        cfg.login = LoginConfig(login_url="http://x/login", username="u", password="p",
+                                storage_state_path=str(tmp_path / "state.json"))
+        m = Mapper(cfg)
+        m._used_reused_storage = True
+        page = MagicMock()
+        page.url = "http://x/login"
+        page.goto = AsyncMock()
+        form_post = mock_request(method="POST", url="http://localhost:8080/api/items")
+        allowed = []
+
+        async def login(*args):
+            allowed.append(m.write_guard.is_allowed(form_post))
+            if len(allowed) == 1:
+                raise RuntimeError("stale session")
+
+        with patch("crawler.mapper.perform_login", AsyncMock(side_effect=login)):
+            await m._ensure_authenticated(page)
+
+        assert allowed == [True, True]
+        assert m.write_guard.is_allowed(form_post) is False
 
 
 class TestCleanup:

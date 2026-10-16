@@ -14,7 +14,7 @@ from ..origin import origin_of
 logger = logging.getLogger(__name__)
 
 
-def _is_login_url(url: str, cfg: LoginConfig) -> bool:
+def is_login_url(url: str, cfg: LoginConfig) -> bool:
     if origin_of(url) != origin_of(cfg.login_url):
         return False
     path = urlparse(url).path.rstrip('/')
@@ -23,7 +23,7 @@ def _is_login_url(url: str, cfg: LoginConfig) -> bool:
 
 
 def is_on_login_page(page: Page, cfg: LoginConfig) -> bool:
-    return _is_login_url(page.url, cfg)
+    return is_login_url(page.url, cfg)
 
 
 def storage_state_valid(cfg: LoginConfig) -> bool:
@@ -79,7 +79,7 @@ async def perform_login(page: Page, cfg: LoginConfig, app_url: str) -> None:
 
     try:
         await page.wait_for_url(
-            lambda url: origin_of(url) == app_origin and not _is_login_url(url, cfg),
+            lambda url: origin_of(url) == app_origin and not is_login_url(url, cfg),
             timeout=cfg.post_login_wait_ms + 30000,
         )
     except PlaywrightTimeoutError as e:

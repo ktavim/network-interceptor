@@ -22,6 +22,8 @@
     "storage_state_path": "storage_state.json",
     "reuse_storage_state": true
   },
+  "write_policy": "block",
+  "allow_write_patterns": [],
   "exclude_patterns": [
     "logout",
     "delete",

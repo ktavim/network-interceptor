@@ -11,7 +11,7 @@ from .auth import is_on_login_page, perform_login, storage_state_valid
 from .navigation import NavigationHandler
 from .navigation.dom_hasher import DOMHasher
 from .navigation.selectors import INTERACTIVE_SELECTORS, POPUP_CONTAINER_SELECTORS
-from .network import NetworkInterceptor, RequestCapture
+from .network import NetworkInterceptor, RequestCapture, WriteGuard
 from .network.auth_analyzer import aggregate_by_origin
 from .network.resolver import resolve_hosts
 from .origin import Origin, origin_of
@@ -27,6 +27,7 @@ class Mapper:
     def __init__(self, config: Config, on_event: Optional[EventCallback] = None):
         self.config = config
         self.interceptor = NetworkInterceptor()
+        self.write_guard = WriteGuard(config)
         self.dom_hasher = DOMHasher()
         self.navigator = NavigationHandler(config, self.dom_hasher)
         self.playwright = None
@@ -93,6 +94,10 @@ class Mapper:
             user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
                        '(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         )
+        if self.write_guard.enabled:
+            # A service worker's own fetches bypass context.route, so it could
+            # send the very writes the guard is there to stop.
+            context_kwargs['service_workers'] = 'block'
         if (self.config.login
                 and self.config.login.reuse_storage_state
                 and storage_state_valid(self.config.login)):
@@ -101,9 +106,11 @@ class Mapper:
             logger.info("Reusing stored session from %s", self.config.login.storage_state_path)
 
         self.context = await self.browser.new_context(**context_kwargs)
+        # Before the first page exists, so no request goes out unguarded.
+        await self.write_guard.attach(self.context)
         self.page = await self.context.new_page()
 
-        self._capture = RequestCapture(self.interceptor, self.config.start_url)
+        self._capture = RequestCapture(self.interceptor, self.config.start_url, self.write_guard)
         self._capture.attach(self.page, self.context)
 
     async def map_website(self) -> Dict[str, Any]:
@@ -119,6 +126,8 @@ class Mapper:
 
         external_services = aggregate_by_origin(self.interceptor.get_requests())
         logger.info("Mapping complete. Found %d external services.", len(external_services))
+        if self.write_guard.blocked_count:
+            logger.info("Write guard blocked %d state-changing requests.", self.write_guard.blocked_count)
 
         ips_by_host = await resolve_hosts(e['host'] for e in external_services)
         for entry in external_services:
@@ -140,19 +149,22 @@ class Mapper:
         if not cfg or not is_on_login_page(page, cfg):
             return
 
-        try:
-            await perform_login(page, cfg, self.config.start_url)
-        except Exception as e:
-            if not self._used_reused_storage:
-                raise
-            logger.warning("Login failed with reused session (%s); discarding and retrying", e)
+        # The login form POSTs, and so may the redirect chain back to the app
+        # (SAML POST binding, OIDC form_post).
+        with self.write_guard.allow_writes():
             try:
-                os.remove(cfg.storage_state_path)
-            except OSError:
-                pass
-            self._used_reused_storage = False
-            await page.goto(cfg.login_url, wait_until='load', timeout=self.config.wait_timeout)
-            await perform_login(page, cfg, self.config.start_url)
+                await perform_login(page, cfg, self.config.start_url)
+            except Exception as e:
+                if not self._used_reused_storage:
+                    raise
+                logger.warning("Login failed with reused session (%s); discarding and retrying", e)
+                try:
+                    os.remove(cfg.storage_state_path)
+                except OSError:
+                    pass
+                self._used_reused_storage = False
+                await page.goto(cfg.login_url, wait_until='load', timeout=self.config.wait_timeout)
+                await perform_login(page, cfg, self.config.start_url)
 
     async def _explore_page(self, page: Page, depth: int) -> None:
         if depth >= self.config.max_depth:

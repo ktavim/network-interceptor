@@ -4,7 +4,8 @@ import logging
 import pytest
 from unittest.mock import AsyncMock, MagicMock
 
-from crawler.network import NetworkInterceptor, RequestCapture
+from crawler.network import NetworkInterceptor, RequestCapture, WriteGuard
+from crawler.network.write_guard import BLOCKED_FAILURE_REASON
 
 
 @pytest.fixture
@@ -189,6 +190,28 @@ class TestOnRequestFailed:
                            failure="net::ERR_ABORTED")
         await capture._on_request_failed(req, page=mock_page())
         assert interceptor.requests[0]["authentication"] == "bearer"
+
+    async def test_write_guard_block_is_named_as_such(self, interceptor, make_config, mock_request, mock_page):
+        guard = WriteGuard(make_config())
+        capture = RequestCapture(interceptor, "http://localhost:8080", guard)
+        req = mock_request(method="POST", url="http://api.example.com/v1",
+                           headers={"authorization": "Bearer abc"}, failure="net::ERR_BLOCKED_BY_CLIENT")
+        guard._blocked.add(req)
+        await capture._on_request_failed(req, page=mock_page())
+        record = interceptor.requests[0]
+        assert record["failure_reason"] == BLOCKED_FAILURE_REASON
+        # What the request sent is still evidence; only the response is missing.
+        assert record["method"] == "POST"
+        assert record["authentication"] == "bearer"
+
+    async def test_unblocked_failure_keeps_browser_error_with_guard(
+        self, interceptor, make_config, mock_request, mock_page
+    ):
+        capture = RequestCapture(interceptor, "http://localhost:8080", WriteGuard(make_config()))
+        req = mock_request(url="http://api.example.com/v1", failure="net::ERR_NAME_NOT_RESOLVED")
+        await capture._on_request_failed(req, page=mock_page())
+        assert interceptor.requests[0]["failure_reason"] == "net::ERR_NAME_NOT_RESOLVED"
+        assert interceptor.requests[0]["authentication"] == "no_response"
 
     async def test_page_url_is_read_when_the_request_fires(self, capture, interceptor, mock_request, mock_page):
         # The navigation that aborts a request commits before the failure lands:

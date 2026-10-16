@@ -50,6 +50,29 @@ class TestLoadConfig:
         # When exclude_patterns absent, Config.__post_init__ applies the default list.
         assert config.exclude_patterns == ["logout", "delete", "remove", "login", "signin"]
         assert config.login is None
+        # Writes are blocked unless the config opts out.
+        assert config.write_policy == "block"
+        assert config.allow_write_patterns == []
+
+    def test_load_write_policy(self, tmp_path):
+        config_file = tmp_path / "config.json"
+        config_file.write_text(json.dumps({
+            "start_url": "https://example.com",
+            "write_policy": "allow",
+            "allow_write_patterns": ["/api/search"],
+        }))
+
+        config = load_config(str(config_file))
+        assert config.write_policy == "allow"
+        assert config.allow_write_patterns == ["/api/search"]
+
+    def test_unknown_write_policy_is_rejected(self, tmp_path):
+        # A typo must not silently turn the guard off.
+        config_file = tmp_path / "config.json"
+        config_file.write_text(json.dumps({"start_url": "https://example.com", "write_policy": "off"}))
+
+        with pytest.raises(ValueError, match="write_policy"):
+            load_config(str(config_file))
 
     def test_load_config_missing_start_url(self, tmp_path):
         config_file = tmp_path / "config.json"

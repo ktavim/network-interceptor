@@ -243,11 +243,16 @@ class OverlayHandler:
             try:
                 elements = await page.query_selector_all(selector)
                 for el in elements:
-                    if await el.is_visible():
-                        logger.debug("Clicking affirmative action as fallback: %s", selector)
-                        await el.click(timeout=2000)
-                        await page.wait_for_timeout(1000)
-                        action_taken = True
+                    if not await el.is_visible():
+                        continue
+                    # 'input[type="submit"]' and '.btn-primary' match by role, not
+                    # text, so they can still land on a "Delete" or "Log out".
+                    if await is_destructive_action(el, exclude_patterns=self.exclude_patterns):
+                        continue
+                    logger.debug("Clicking affirmative action as fallback: %s", selector)
+                    await el.click(timeout=2000)
+                    await page.wait_for_timeout(1000)
+                    action_taken = True
             except Exception:
                 continue
         return action_taken

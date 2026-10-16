@@ -119,7 +119,6 @@ AFFIRMATIVE_ACTION_SELECTORS = [
     'button:has-text("Save")',
     'button:has-text("Create")',
     'button:has-text("Update")',
-    'button:has-text("Delete")',
     'input[type="submit"]',
     '.btn-primary:not([disabled])',
 ]

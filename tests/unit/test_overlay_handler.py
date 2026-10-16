@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from crawler.navigation.overlay_handler import OverlayHandler
 from crawler.navigation.form_filler import FormFiller
+from crawler.navigation.selectors import AFFIRMATIVE_ACTION_SELECTORS
 
 
 @pytest.fixture
@@ -178,6 +179,43 @@ class TestNeutralizeInHandle:
 
         neut.assert_called_once()
         overlay._run_dismiss_selectors.assert_called_once()
+
+
+class TestClickAffirmativeFallback:
+    def test_delete_is_not_an_affirmative_action(self):
+        assert not any("Delete" in s for s in AFFIRMATIVE_ACTION_SELECTORS)
+
+    async def test_skips_destructive_match(self, overlay, mock_page, mock_element):
+        # 'input[type="submit"]' matches by role, so it can land on a delete button.
+        page = mock_page()
+        delete = mock_element(text="Delete account")
+        delete.is_visible = AsyncMock(return_value=True)
+        delete.click = AsyncMock()
+        page.query_selector_all = AsyncMock(return_value=[delete])
+
+        assert await overlay._click_affirmative_fallback(page) is False
+        delete.click.assert_not_called()
+
+    async def test_skips_configured_exclude_pattern(self, mock_page, mock_element):
+        overlay = OverlayHandler(MagicMock(), exclude_patterns=["archive"])
+        page = mock_page()
+        archive = mock_element(text="Archive project")
+        archive.is_visible = AsyncMock(return_value=True)
+        archive.click = AsyncMock()
+        page.query_selector_all = AsyncMock(return_value=[archive])
+
+        assert await overlay._click_affirmative_fallback(page) is False
+        archive.click.assert_not_called()
+
+    async def test_clicks_non_destructive_match(self, overlay, mock_page, mock_element):
+        page = mock_page()
+        ok = mock_element(text="Continue")
+        ok.is_visible = AsyncMock(return_value=True)
+        ok.click = AsyncMock()
+        page.query_selector_all = AsyncMock(return_value=[ok])
+
+        assert await overlay._click_affirmative_fallback(page) is True
+        ok.click.assert_called()
 
 
 class TestClickInteractiveInModal:

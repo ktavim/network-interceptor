@@ -82,13 +82,14 @@ def mock_page():
 def mock_request():
     """Factory for a mock Playwright Request."""
     def _mock_request(method="GET", url="http://api.example.com/v1/test",
-                      headers=None, resource_type="fetch", failure=None):
+                      headers=None, resource_type="fetch", failure=None, post_data=None):
         req = MagicMock()
         req.method = method
         req.url = url
         req.headers = headers or {}
         req.resource_type = resource_type
         req.failure = failure
+        req.post_data = post_data
         return req
     return _mock_request
 
