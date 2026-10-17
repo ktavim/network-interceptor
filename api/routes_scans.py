@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from typing import List, Optional
 
 from fastapi import APIRouter, HTTPException, Request, Response, status
-from sqlalchemy import case, func, select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -19,6 +19,7 @@ from core.db import (
     SubmissionRow,
     UrlRow,
     load_services,
+    unresolved_count,
 )
 from core.enums import AuthMethod, JobStatus, Scanner, ScanStatus, Severity
 from core.events import emit_event
@@ -76,19 +77,8 @@ def _summary_aggregates_subq():
         select(
             ServiceRow.scan_id.label("scan_id"),
             func.count(ServiceRow.id).label("service_count"),
-            func.coalesce(
-                func.sum(
-                    case(
-                        (
-                            (ServiceRow.severity == Severity.blocker.value)
-                            & (ServiceRow.excluded.is_(False)),
-                            1,
-                        ),
-                        else_=0,
-                    )
-                ),
-                0,
-            ).label("blocker_count"),
+            unresolved_count(Severity.blocker).label("blocker_count"),
+            unresolved_count(Severity.review).label("review_count"),
             func.count(func.distinct(ServiceRow.auth_method)).label("auth_count"),
         )
         .group_by(ServiceRow.scan_id)
@@ -127,6 +117,7 @@ async def list_scans(request: Request) -> List[ScanSummary]:
             select(
                 ScanRow,
                 func.coalesce(agg.c.blocker_count, 0).label("blocker_count"),
+                func.coalesce(agg.c.review_count, 0).label("review_count"),
                 func.coalesce(agg.c.service_count, 0).label("service_count"),
                 SubmissionRow.submitted_at,
                 SubmissionRow.submitted_by,
@@ -137,11 +128,12 @@ async def list_scans(request: Request) -> List[ScanSummary]:
         )
         result = await session.execute(stmt)
         out: list[ScanSummary] = []
-        for scan, blocker_count, service_count, submitted_at, submitted_by in result.all():
+        for scan, blocker_count, review_count, service_count, submitted_at, submitted_by in result.all():
             out.append(
                 scan_to_summary(
                     scan,
                     blocker_count=int(blocker_count or 0),
+                    review_count=int(review_count or 0),
                     service_count=int(service_count or 0),
                     submitted_at=submitted_at,
                     submitted_by=submitted_by,
@@ -159,6 +151,7 @@ async def get_scan(scan_id: str, request: Request) -> ScanDetail:
             select(
                 ScanRow,
                 func.coalesce(agg.c.blocker_count, 0),
+                func.coalesce(agg.c.review_count, 0),
                 func.coalesce(agg.c.service_count, 0),
                 func.coalesce(agg.c.auth_count, 0),
                 SubmissionRow.submitted_at,
@@ -171,7 +164,7 @@ async def get_scan(scan_id: str, request: Request) -> ScanDetail:
         row = (await session.execute(stmt)).first()
         if not row:
             raise HTTPException(status_code=404, detail={"message": "scan not found"})
-        scan, blocker_count, service_count, auth_count, submitted_at, submitted_by = row
+        scan, blocker_count, review_count, service_count, auth_count, submitted_at, submitted_by = row
         jobs = (
             await session.execute(
                 select(ScanJobRow)
@@ -182,6 +175,7 @@ async def get_scan(scan_id: str, request: Request) -> ScanDetail:
         return scan_to_detail(
             scan,
             blocker_count=int(blocker_count or 0),
+            review_count=int(review_count or 0),
             service_count=int(service_count or 0),
             auth_methods=int(auth_count or 0),
             jobs=jobs,
@@ -396,21 +390,20 @@ async def submit_scan(scan_id: str, request: Request) -> SubmitScanResponse:
                 detail={"message": "this scan has already been submitted"},
             )
 
-        unresolved_blockers = (
+        # A review blocks too: submitting would vouch for a service no one has
+        # told apart yet. Filling in its method or excluding it resolves it.
+        blockers, reviews = (
             await session.execute(
-                select(func.count())
-                .select_from(ServiceRow)
-                .where(
-                    ServiceRow.scan_id == scan_id,
-                    ServiceRow.severity == Severity.blocker.value,
-                    ServiceRow.excluded.is_(False),
-                )
+                select(unresolved_count(Severity.blocker), unresolved_count(Severity.review))
+                .where(ServiceRow.scan_id == scan_id)
             )
-        ).scalar_one()
-        if unresolved_blockers:
+        ).one()
+        if blockers or reviews:
+            unresolved = [f"{blockers} unresolved blocker(s)"] if blockers else []
+            unresolved += [f"{reviews} service(s) to review"] if reviews else []
             raise HTTPException(
                 status_code=409,
-                detail={"message": f"{unresolved_blockers} unresolved blocker(s) remain"},
+                detail={"message": f"{' and '.join(unresolved)} remain"},
             )
 
         # Load AppRow *before* staging the new SubmissionRow — otherwise the

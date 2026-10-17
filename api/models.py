@@ -9,6 +9,7 @@ from core.enums import AuthMethod, JobStatus, Scanner, ScanStatus, Severity, Sou
 class ExposureState(str, Enum):
     never_scanned = "never_scanned"
     ready_for_submission = "ready_for_submission"
+    # A blocker or a review not excluded on the latest scan.
     blocked = "blocked"
     submitted = "submitted"
     failed = "failed"
@@ -134,7 +135,9 @@ class ScanSummary(BaseModel):
     started_at: str
     completed_at: Optional[str] = None
     started_by: str
+    # Services not excluded, by severity. Either one above 0 refuses submit.
     blocker_count: int
+    review_count: int
     service_count: int
     submitted_at: Optional[str] = None
     submitted_by: Optional[str] = None

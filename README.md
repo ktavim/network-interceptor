@@ -108,7 +108,7 @@ All under `/api`, except `/health`.
 | `GET` | `/scans/{id}/services` | Services, each with its combined verdict, `found_by`, each scanner's `findings`, and its `sources` |
 | `GET` | `/scans/{id}/services/{sid}/urls?scanner=` | A service's URL evidence, each row with its `scanner` and `sources` |
 | `PATCH` | `/scans/{id}/services/{sid}` | Exclude a service (`excluded`), or fill in an auth method the scanners couldn't tell (`auth_method`): any method for `unknown`, `no_response` or `dns_failed`, and `kerberos` or `ntlm` for `negotiate`. Setting it back to `scanners_auth_method` undoes the correction |
-| `POST` | `/scans/{id}/submit` | Submit a completed scan |
+| `POST` | `/scans/{id}/submit` | Submit a completed scan. Refused (409) while a service that is not excluded is `blocker` or `review`; a scan's `blocker_count` and `review_count` count them |
 | `POST` | `/scans/{id}/cancel` | Cancel a scan |
 | `GET` | `/scans/{id}/events` | The scan's events as a server-sent event stream; resumes from `Last-Event-ID` |
 | `GET` | `/notifications` | Server-sent event stream across all scans |

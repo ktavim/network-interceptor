@@ -2,10 +2,18 @@ import uuid
 from typing import Dict, List, Tuple
 
 from fastapi import APIRouter, HTTPException, Request
-from sqlalchemy import case, func, select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from core.db import AppRow, ScanRow, ServiceRow, SubmissionRow, load_services
+from core.db import (
+    UNRESOLVED_SEVERITIES,
+    AppRow,
+    ScanRow,
+    ServiceRow,
+    SubmissionRow,
+    load_services,
+    unresolved_count,
+)
 from core.enums import AuthMethod, Severity
 
 from .models import (
@@ -27,23 +35,11 @@ def _session_factory(request: Request) -> async_sessionmaker[AsyncSession]:
     return request.app.state.session_factory
 
 
-def _blocker_count_subq():
+def _unresolved_count_subq():
     return (
         select(
             ServiceRow.scan_id.label("scan_id"),
-            func.coalesce(
-                func.sum(
-                    case(
-                        (
-                            (ServiceRow.severity == Severity.blocker.value)
-                            & (ServiceRow.excluded.is_(False)),
-                            1,
-                        ),
-                        else_=0,
-                    )
-                ),
-                0,
-            ).label("blocker_count"),
+            unresolved_count(*UNRESOLVED_SEVERITIES).label("unresolved_count"),
         )
         .group_by(ServiceRow.scan_id)
         .subquery()
@@ -63,12 +59,12 @@ async def list_apps(request: Request) -> List[AppSummary]:
             .group_by(ScanRow.app_id)
             .subquery()
         )
-        blockers = _blocker_count_subq()
+        unresolved = _unresolved_count_subq()
         stmt = (
             select(
                 AppRow,
                 ScanRow,
-                func.coalesce(blockers.c.blocker_count, 0),
+                func.coalesce(unresolved.c.unresolved_count, 0),
             )
             .outerjoin(latest_subq, latest_subq.c.app_id == AppRow.id)
             .outerjoin(
@@ -76,17 +72,17 @@ async def list_apps(request: Request) -> List[AppSummary]:
                 (ScanRow.app_id == AppRow.id)
                 & (ScanRow.started_at == latest_subq.c.latest_started_at),
             )
-            .outerjoin(blockers, blockers.c.scan_id == ScanRow.id)
+            .outerjoin(unresolved, unresolved.c.scan_id == ScanRow.id)
             .order_by(AppRow.created_at.desc())
         )
         result = await session.execute(stmt)
         out: list[AppSummary] = []
-        for app, scan, blocker_count in result.all():
+        for app, scan, unresolved_total in result.all():
             out.append(
                 app_to_summary(
                     app,
                     last_scan=scan,
-                    last_scan_blocker_count=int(blocker_count or 0),
+                    last_scan_unresolved_count=int(unresolved_total or 0),
                 )
             )
         return out
@@ -108,7 +104,7 @@ async def create_app(body: CreateAppRequest, request: Request) -> AppSummary:
         await session.commit()
         await session.refresh(app)
 
-    return app_to_summary(app, last_scan=None, last_scan_blocker_count=0)
+    return app_to_summary(app, last_scan=None, last_scan_unresolved_count=0)
 
 
 @router.get("/apps/{app_id}/scans", response_model=List[ScanSummary])
@@ -119,19 +115,8 @@ async def list_app_scans(app_id: str, request: Request) -> List[ScanSummary]:
             select(
                 ServiceRow.scan_id.label("scan_id"),
                 func.count(ServiceRow.id).label("service_count"),
-                func.coalesce(
-                    func.sum(
-                        case(
-                            (
-                                (ServiceRow.severity == Severity.blocker.value)
-                                & (ServiceRow.excluded.is_(False)),
-                                1,
-                            ),
-                            else_=0,
-                        )
-                    ),
-                    0,
-                ).label("blocker_count"),
+                unresolved_count(Severity.blocker).label("blocker_count"),
+                unresolved_count(Severity.review).label("review_count"),
             )
             .group_by(ServiceRow.scan_id)
             .subquery()
@@ -141,6 +126,7 @@ async def list_app_scans(app_id: str, request: Request) -> List[ScanSummary]:
             select(
                 ScanRow,
                 func.coalesce(agg.c.blocker_count, 0),
+                func.coalesce(agg.c.review_count, 0),
                 func.coalesce(agg.c.service_count, 0),
                 SubmissionRow.submitted_at,
                 SubmissionRow.submitted_by,
@@ -152,11 +138,12 @@ async def list_app_scans(app_id: str, request: Request) -> List[ScanSummary]:
         )
         result = await session.execute(stmt)
         out: list[ScanSummary] = []
-        for scan, blocker_count, service_count, submitted_at, submitted_by in result.all():
+        for scan, blocker_count, review_count, service_count, submitted_at, submitted_by in result.all():
             out.append(
                 scan_to_summary(
                     scan,
                     blocker_count=int(blocker_count or 0),
+                    review_count=int(review_count or 0),
                     service_count=int(service_count or 0),
                     submitted_at=submitted_at,
                     submitted_by=submitted_by,

@@ -14,6 +14,8 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    case,
+    func,
     select,
     text,
 )
@@ -459,6 +461,30 @@ async def load_services(
         )
         for service, evidence, published_origin in (await session.execute(services)).all()
     ]
+
+
+# What keeps a scan from being submitted: a service that blocks, or one whose
+# method the scanners could not tell and no one has filled in yet. Excluding
+# the service resolves either.
+UNRESOLVED_SEVERITIES = (Severity.blocker, Severity.review)
+
+
+def unresolved_count(*severities: Severity):
+    """A SUM over service rows: how many have one of `severities` and are not
+    excluded. 0, never NULL."""
+    return func.coalesce(
+        func.sum(
+            case(
+                (
+                    ServiceRow.severity.in_([severity.value for severity in severities])
+                    & ServiceRow.excluded.is_(False),
+                    1,
+                ),
+                else_=0,
+            )
+        ),
+        0,
+    )
 
 
 def _database_url() -> str:

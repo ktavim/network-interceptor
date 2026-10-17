@@ -1,5 +1,5 @@
-"""The manual auth-method override in PATCH /scans/{id}/services/{id}, against a
-real Postgres. Set TEST_DATABASE_URL to run."""
+"""The manual auth-method override in PATCH /scans/{id}/services/{id}, and the
+submit it unblocks, against a real Postgres. Set TEST_DATABASE_URL to run."""
 import uuid
 from types import SimpleNamespace
 
@@ -7,7 +7,8 @@ import pytest
 from fastapi import HTTPException
 
 from api.models import PatchServiceRequest
-from api.routes_scans import patch_service
+from api.routes_apps import list_apps
+from api.routes_scans import get_scan, patch_service, submit_scan
 from core.db import AppRow, PublishedOriginRow, ScanRow, ServiceFindingRow, ServiceRow
 from core.enums import AuthMethod, Scanner, Severity
 
@@ -41,9 +42,12 @@ async def _add_service(
     return scan_id, service_id
 
 
+def _request(factory) -> SimpleNamespace:
+    return SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(session_factory=factory)))
+
+
 async def _patch(factory, scan_id, service_id, auth_method: AuthMethod):
-    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(session_factory=factory)))
-    return await patch_service(scan_id, service_id, PatchServiceRequest(auth_method=auth_method), request)
+    return await patch_service(scan_id, service_id, PatchServiceRequest(auth_method=auth_method), _request(factory))
 
 
 _FILL_INS = [AuthMethod.unknown, AuthMethod.no_response, AuthMethod.dns_failed]
@@ -150,3 +154,51 @@ async def test_a_published_service_keeps_its_severity_when_filled_in(factory):
     assert (service.auth_method, service.severity, service.published_origin.id) == (
         "ntlm", "published", entry_id,
     )
+
+
+async def _refused_submit(factory, scan_id) -> str:
+    with pytest.raises(HTTPException) as e:
+        await submit_scan(scan_id, _request(factory))
+    assert e.value.status_code == 409
+    return e.value.detail["message"]
+
+
+async def _exposure_state(factory, scan_id) -> str:
+    return next(a for a in await list_apps(_request(factory)) if a.last_scan_id == scan_id).exposure_state
+
+
+async def test_a_review_refuses_submit(factory):
+    scan_id, _ = await _add_service(factory, AuthMethod.no_response, Severity.review)
+    detail = await get_scan(scan_id, _request(factory))
+    assert (detail.blocker_count, detail.review_count) == (0, 1)
+    assert await _refused_submit(factory, scan_id) == "1 service(s) to review remain"
+    # The app reads the way submit answers.
+    assert await _exposure_state(factory, scan_id) == "blocked"
+
+
+async def test_a_blocker_and_a_review_are_both_named(factory):
+    scan_id, _ = await _add_service(factory, AuthMethod.negotiate, Severity.review)
+    async with factory() as session:
+        session.add(ServiceRow(
+            id=uuid.uuid4().hex, scan_id=scan_id, scheme="https", host="b.com", port=443,
+            auth_method=AuthMethod.ntlm.value, severity=Severity.blocker.value,
+        ))
+        await session.commit()
+    assert await _refused_submit(factory, scan_id) == (
+        "1 unresolved blocker(s) and 1 service(s) to review remain"
+    )
+
+
+async def test_filling_in_a_review_lets_the_scan_submit(factory):
+    scan_id, service_id = await _add_service(factory, AuthMethod.negotiate, Severity.review)
+    await _patch(factory, scan_id, service_id, AuthMethod.kerberos)
+    assert await _exposure_state(factory, scan_id) == "ready_for_submission"
+    assert (await submit_scan(scan_id, _request(factory))).submission_id
+
+
+async def test_excluding_a_review_lets_the_scan_submit(factory):
+    scan_id, service_id = await _add_service(factory, AuthMethod.dns_failed, Severity.review)
+    await patch_service(scan_id, service_id, PatchServiceRequest(excluded=True), _request(factory))
+    detail = await get_scan(scan_id, _request(factory))
+    assert (detail.blocker_count, detail.review_count) == (0, 0)
+    assert (await submit_scan(scan_id, _request(factory))).submission_id

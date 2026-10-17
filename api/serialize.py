@@ -151,6 +151,7 @@ def scan_to_summary(
     scan: ScanRow,
     *,
     blocker_count: int,
+    review_count: int,
     service_count: int,
     submitted_at: datetime | None = None,
     submitted_by: str | None = None,
@@ -165,6 +166,7 @@ def scan_to_summary(
         completed_at=_isoformat(scan.completed_at),
         started_by=scan.started_by,
         blocker_count=blocker_count,
+        review_count=review_count,
         service_count=service_count,
         submitted_at=_isoformat(submitted_at),
         submitted_by=submitted_by,
@@ -173,7 +175,7 @@ def scan_to_summary(
 
 def derive_exposure_state(
     last_status: Optional[str],
-    last_blocker_count: int,
+    last_unresolved_count: int,
     *,
     is_submitted: bool = False,
 ) -> ExposureState:
@@ -190,9 +192,11 @@ def derive_exposure_state(
     # only be rerun: it can be neither submitted nor edited.
     if last_status in ("failed", "cancelled", "partial"):
         return ExposureState.failed
+    # The submit route's condition: blockers and reviews alike, so an app never
+    # reads ready for a scan that submit would refuse.
     return (
         ExposureState.blocked
-        if last_blocker_count > 0
+        if last_unresolved_count > 0
         else ExposureState.ready_for_submission
     )
 
@@ -201,7 +205,7 @@ def app_to_summary(
     app: AppRow,
     *,
     last_scan: Optional[ScanRow],
-    last_scan_blocker_count: int,
+    last_scan_unresolved_count: int,
 ) -> AppSummary:
     # `current_scan_id` is set only on submit success, so its presence is the
     # authoritative signal that the app has been submitted.
@@ -213,7 +217,7 @@ def app_to_summary(
         owner_ad_group=app.owner_ad_group or "",
         exposure_state=derive_exposure_state(
             last_scan.status if last_scan else None,
-            last_scan_blocker_count,
+            last_scan_unresolved_count,
             is_submitted=is_submitted,
         ),
         last_scan_id=last_scan.id if last_scan else None,
@@ -227,6 +231,7 @@ def scan_to_detail(
     scan: ScanRow,
     *,
     blocker_count: int,
+    review_count: int,
     service_count: int,
     auth_methods: int,
     jobs: Sequence[ScanJobRow],
@@ -250,6 +255,7 @@ def scan_to_detail(
         completed_at=_isoformat(scan.completed_at),
         started_by=scan.started_by,
         blocker_count=blocker_count,
+        review_count=review_count,
         service_count=service_count,
         duration_ms=duration_ms,
         pages_crawled=pages_crawled,
