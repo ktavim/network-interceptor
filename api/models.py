@@ -97,6 +97,10 @@ class Service(BaseModel):
     # person fills in one the scanners could not tell. The severity is the
     # method's, or `published` from the registry whatever the method.
     auth_method: AuthMethod
+    # The combined verdict itself, whatever the label was set to since: where
+    # it differs from auth_method, a person set the label, and PATCHing it
+    # back undoes that. None only for a service with no findings.
+    scanners_auth_method: Optional[AuthMethod] = None
     severity: Severity
     request_count: int
     ips: Optional[List[str]] = None

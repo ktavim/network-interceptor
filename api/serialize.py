@@ -12,6 +12,7 @@ from core.db import (
     UrlRow,
 )
 from core.enums import AuthMethod, JobStatus, Scanner, Severity, SourceKind
+from core.jobs import scanners_verdict
 from core.translate import parse_source, severity_for
 
 from .models import (
@@ -81,6 +82,11 @@ def service_to_schema(
         host=row.host,
         port=row.port,
         auth_method=AuthMethod(row.auth_method),
+        scanners_auth_method=(
+            scanners_verdict(row, [finding for finding, _ in findings]).auth_method
+            if findings
+            else None
+        ),
         severity=Severity(row.severity),
         request_count=row.request_count,
         ips=row.ips,

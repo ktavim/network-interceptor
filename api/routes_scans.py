@@ -14,6 +14,7 @@ from core.db import (
     AppRow,
     ScanJobRow,
     ScanRow,
+    ServiceFindingRow,
     ServiceRow,
     SubmissionRow,
     UrlRow,
@@ -40,13 +41,26 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-# The auth methods a manual correction may replace, and so never set: the ones
-# that mean the scanners could not tell what the service takes.
+# The scanners' verdicts that mean they could not tell what the service takes.
+# A person may fill one in, but never set one: only the scanners say they could
+# not tell.
 _FILL_IN_AUTH_METHODS = (
-    AuthMethod.unknown.value,
-    AuthMethod.no_response.value,
-    AuthMethod.dns_failed.value,
+    AuthMethod.unknown,
+    AuthMethod.no_response,
+    AuthMethod.dns_failed,
 )
+
+# What a person may set a service's auth method to, by the scanners' verdict
+# for it. A verdict not here is a detected method and stays locked. negotiate is
+# SPNEGO whose mechanism went unresolved, so only the mechanism may be named.
+# Setting the verdict itself is always allowed: it undoes a correction.
+_MANUAL_AUTH_TARGETS: dict[AuthMethod, frozenset[AuthMethod]] = {
+    **{
+        verdict: frozenset(AuthMethod) - frozenset(_FILL_IN_AUTH_METHODS)
+        for verdict in _FILL_IN_AUTH_METHODS
+    },
+    AuthMethod.negotiate: frozenset({AuthMethod.kerberos, AuthMethod.ntlm}),
+}
 
 
 def _session_factory(request: Request) -> async_sessionmaker[AsyncSession]:
@@ -302,19 +316,28 @@ async def patch_service(
         if body.auth_method is not None:
             # Manual auth correction is allowed only as a fill-in for what the
             # scanners couldn't classify ("unknown"), never got an answer from
-            # ("no_response") or couldn't resolve ("dns_failed") — never to
-            # override an auto-detected method, and never back to any of them.
-            # "other" (a real but unnamed challenge) counts as classified, so
-            # it stays locked here too.
-            if service.auth_method not in _FILL_IN_AUTH_METHODS:
+            # ("no_response") or couldn't resolve ("dns_failed"), or as the
+            # mechanism of a SPNEGO challenge ("negotiate") — never to override
+            # an auto-detected method. "other" (a real but unnamed challenge)
+            # counts as classified, so it stays locked here too. Keyed by the
+            # scanners' verdict, not the current label, so a correction can be
+            # corrected again or undone until the scan is submitted.
+            findings = (
+                await session.execute(
+                    select(ServiceFindingRow).where(ServiceFindingRow.service_id == service_id)
+                )
+            ).scalars()
+            verdict = jobs.scanners_verdict(service, findings).auth_method
+            targets = _MANUAL_AUTH_TARGETS.get(verdict)
+            if targets is None:
                 raise HTTPException(
                     status_code=409,
-                    detail={"message": "auth method can only be set manually while it is unknown, no_response or dns_failed"},
+                    detail={"message": "auth method can only be set manually when the scanners found it unknown, no_response, dns_failed or negotiate"},
                 )
-            if body.auth_method.value in _FILL_IN_AUTH_METHODS:
+            if body.auth_method is not verdict and body.auth_method not in targets:
                 raise HTTPException(
                     status_code=422,
-                    detail={"message": f"cannot set auth method to {body.auth_method.value}"},
+                    detail={"message": f"cannot set auth method to {body.auth_method.value} when the scanners found {verdict.value}"},
                 )
             service.auth_method = body.auth_method.value
             # Severity is derived from the auth method, so re-derive it using

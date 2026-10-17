@@ -53,7 +53,7 @@ def severity_for(auth_method: AuthMethod) -> Severity:
     resolve, and "unknown" is an answer that names no scheme: from the tracer
     a bare 401, a coarse 4xx or a 5xx, from the interceptor a producer that
     drifted from the vocabulary. The manual auth-method override exists to
-    fill in the last three. An AuthMethod added without a tier here lands on
+    fill in the last three and to name negotiate's mechanism. An AuthMethod added without a tier here lands on
     review as well, in front of a human, rather than clearing unexamined.
     Never "published": that comes from the published-origins registry
     (core.jobs._recompute_services), not from a method.

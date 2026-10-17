@@ -9,7 +9,7 @@ then events (core.events). Every timestamp here is the database's now().
 """
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 from sqlalchemy import Row, case, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -17,7 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from .db import PublishedOriginRow, ScanJobRow, ScanRow, ServiceFindingRow, ServiceRow, UrlRow
 from .enums import AuthMethod, JobStatus, Scanner, ScanStatus, Severity
 from .events import emit_event
-from .merge import Finding, merge_findings
+from .merge import Finding, Verdict, merge_findings
 
 LEASE_TIMEOUT = timedelta(seconds=60)
 WORKER_LOST = "worker lost"
@@ -426,6 +426,25 @@ async def _record_findings(
     )
 
 
+def scanners_verdict(service: ServiceRow, findings: Iterable[ServiceFindingRow]) -> Verdict:
+    """The combined verdict of a service's findings (core.merge), whatever a
+    person set the service's label to since.
+
+    No scanner's addresses are kept apart; the service's are the union. That is
+    exact where the merge reads has_ips, to drop a tracer dns_failed: the tracer
+    resolved none, so any address is the interceptor's.
+    """
+    return merge_findings(
+        Finding(
+            scanner=Scanner(f.scanner),
+            auth_method=AuthMethod(f.auth_method),
+            evidence_url_id=f.evidence_url_id,
+            has_ips=bool(service.ips),
+        )
+        for f in findings
+    )
+
+
 async def _recompute_services(session: AsyncSession, scan_id: str) -> List[ServiceRow]:
     """Set each of the scan's services to the combined verdict of its findings; returns the services.
 
@@ -455,18 +474,7 @@ async def _recompute_services(session: AsyncSession, scan_id: str) -> List[Servi
         ).scalars()
     }
     for service, own in findings.items():
-        # No scanner's addresses are kept apart; the service's are the union. That is exact
-        # where the merge reads has_ips, to drop a tracer dns_failed: the tracer resolved
-        # none, so any address is the interceptor's.
-        verdict = merge_findings(
-            Finding(
-                scanner=Scanner(f.scanner),
-                auth_method=AuthMethod(f.auth_method),
-                evidence_url_id=f.evidence_url_id,
-                has_ips=bool(service.ips),
-            )
-            for f in own
-        )
+        verdict = scanners_verdict(service, own)
         service.auth_method = verdict.auth_method.value
         service.evidence_url_id = verdict.evidence_url_id
         service.request_count = sum(f.url_count for f in own)
