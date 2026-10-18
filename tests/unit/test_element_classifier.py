@@ -6,6 +6,7 @@ from crawler.navigation.element_classifier import (
     is_destructive_action,
     is_date_picker_element,
     get_clickable_elements,
+    link_target,
     neutralize_dropdown_masks,
 )
 
@@ -211,3 +212,76 @@ class TestGetClickableElements:
             ec.CLICKABLE_SELECTORS = original
 
         assert len(result) == 2
+
+    async def _collect_links(self, hrefs, href_allowed, max_clicks=10):
+        from crawler.navigation import element_classifier as ec
+        page = MagicMock()
+        elems = []
+        for i, href in enumerate(hrefs):
+            e = AsyncMock()
+            # outerHTML, is-clickable, link target, date-picker ancestor.
+            e.evaluate = AsyncMock(side_effect=[f"<a>{i}</a>", True, href, False])
+            e.get_attribute = AsyncMock(return_value=None)
+            elems.append(e)
+        locators = [self._make_loc() for _ in hrefs]
+        page.query_selector_all = AsyncMock(side_effect=lambda sel: elems if sel == "a[href]" else [])
+        page.locator = MagicMock(
+            side_effect=lambda sel: MagicMock(nth=MagicMock(side_effect=lambda i: locators[i]))
+        )
+        original = ec.CLICKABLE_SELECTORS
+        ec.CLICKABLE_SELECTORS = ["a[href]"]
+        try:
+            result = await get_clickable_elements(page, max_clicks=max_clicks, href_allowed=href_allowed)
+        finally:
+            ec.CLICKABLE_SELECTORS = original
+        return result, locators
+
+    async def test_links_the_crawl_would_not_follow_are_skipped(self):
+        allowed = lambda href: "localhost" in href
+        result, locators = await self._collect_links(
+            ["https://github.com/", "http://localhost:8080/a"], allowed)
+        assert result == [locators[1]]
+
+    async def test_skipped_links_do_not_use_up_max_clicks(self):
+        allowed = lambda href: "localhost" in href
+        result, locators = await self._collect_links(
+            ["https://github.com/", "https://x.com/", "http://localhost:8080/a"], allowed, max_clicks=1)
+        assert result == [locators[2]]
+
+    async def test_element_outside_any_link_is_kept(self):
+        result, locators = await self._collect_links([""], lambda href: False)
+        assert result == [locators[0]]
+
+
+class TestScrollOrigin:
+    async def test_page_is_scrolled_to_the_top_before_collecting(self):
+        # Form filling leaves the page scrolled to its last field; the
+        # reachability check would then drop everything above the viewport.
+        page = MagicMock()
+        calls = []
+        page.evaluate = AsyncMock(side_effect=lambda js: calls.append(js))
+        page.query_selector_all = AsyncMock(side_effect=lambda sel: calls.append(sel) or [])
+        await get_clickable_elements(page, max_clicks=10)
+        assert calls[0] == "window.scrollTo(0, 0)"
+        assert len(calls) > 1
+
+    async def test_scroll_failure_does_not_stop_collection(self):
+        page = MagicMock()
+        page.evaluate = AsyncMock(side_effect=Exception("navigating"))
+        page.query_selector_all = AsyncMock(return_value=[])
+        assert await get_clickable_elements(page, max_clicks=10) == []
+        page.query_selector_all.assert_awaited()
+
+
+class TestLinkTarget:
+    async def test_returns_the_resolved_href(self, mock_element):
+        el = mock_element(evaluate_result="http://localhost:8080/a")
+        assert await link_target(el) == "http://localhost:8080/a"
+
+    async def test_empty_outside_a_link(self, mock_element):
+        assert await link_target(mock_element(evaluate_result="")) == ""
+
+    async def test_empty_when_evaluate_fails(self):
+        el = AsyncMock()
+        el.evaluate = AsyncMock(side_effect=Exception("detached"))
+        assert await link_target(el) == ""

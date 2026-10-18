@@ -77,7 +77,7 @@ class TestIsReadOnlyGraphql:
 
 
 class TestIsAllowed:
-    @pytest.mark.parametrize("method", ["GET", "HEAD", "OPTIONS", "get"])
+    @pytest.mark.parametrize("method", ["GET", "HEAD", "OPTIONS", "QUERY", "get"])
     def test_safe_methods_pass(self, guard, make_request, method):
         assert guard.is_allowed(make_request(method=method)) is True
 

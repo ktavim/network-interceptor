@@ -8,7 +8,8 @@ before it leaves the browser. That covers every origin, the scanned app's own
 backend included, even though only external requests are recorded.
 
 Let through:
-- GET, HEAD and OPTIONS;
+- GET, HEAD, OPTIONS and QUERY (a GET with a body, safe by definition; some
+  APIs list and search with it);
 - anything while login is in progress (allow_writes());
 - requests to the login URL or below it at any time: after the form itself is
   done, the app still POSTs to the IdP's token endpoint for the code exchange and
@@ -36,7 +37,7 @@ from .auth_analyzer import strip_url
 
 logger = logging.getLogger(__name__)
 
-SAFE_METHODS = frozenset({'GET', 'HEAD', 'OPTIONS'})
+SAFE_METHODS = frozenset({'GET', 'HEAD', 'OPTIONS', 'QUERY'})
 
 # Recorded as a blocked request's 'failure_reason' in place of the browser's
 # "net::ERR_BLOCKED_BY_CLIENT", which would read as an ad blocker.

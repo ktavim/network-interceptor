@@ -2,11 +2,13 @@
 import logging
 import re
 from typing import Set
+from urllib.parse import urldefrag, urlparse
 
 from playwright.async_api import Page, Locator
 
 from config_loader import Config
 
+from ..auth.login import is_login_url
 from ..origin import origin_of
 from . import element_classifier
 from .dom_hasher import DOMHasher
@@ -71,11 +73,36 @@ class NavigationHandler:
         except Exception:
             return False
 
+    def _is_login_page(self, url: str) -> bool:
+        return bool(self.config.login) and is_login_url(url, self.config.login)
+
+    def should_click_href(self, href: str, current_url: str) -> bool:
+        """Whether clicking a link to `href` on `current_url` can lead anywhere the crawl would explore.
+
+        A javascript: link and a link into the current document (a fragment, or
+        href="#" behind a script) don't navigate, and are how menus and tabs
+        open, so they are always clicked. Any other link must go somewhere
+        _should_follow_url accepts and the crawl hasn't visited: otherwise the
+        click only costs a page load and a trip back.
+        """
+        if urlparse(href).scheme.lower() == 'javascript':
+            return True
+        if urldefrag(href).url == urldefrag(current_url).url:
+            return True
+        return self._should_follow_url(href) and href not in self.visited_urls
+
+    async def link_target_allowed(self, page: Page, element) -> bool:
+        """should_click_href for the link `element` is in; True when it's in none."""
+        href = await element_classifier.link_target(element)
+        return not href or self.should_click_href(href, page.url)
+
     async def get_clickable_elements(self, page: Page):
+        current_url = page.url
         return await element_classifier.get_clickable_elements(
             page,
             max_clicks=self.config.max_clicks_per_page,
             exclude_patterns=self.config.exclude_patterns,
+            href_allowed=lambda href: self.should_click_href(href, current_url),
         )
 
     async def fill_page_forms(self, page: Page, root=None):
@@ -111,6 +138,16 @@ class NavigationHandler:
 
             await page.goto(url, wait_until='networkidle', timeout=self.config.wait_timeout)
             await page.wait_for_timeout(self.config.network_idle_timeout)
+
+            # `url` passed the checks above, but a redirect decides where the
+            # page lands. The login page is the exception: Mapper logs in from
+            # there (and it may sit off-origin, or match the "login" exclude
+            # pattern), so a redirect to it still counts as arriving.
+            landed = page.url
+            self.visited_urls.add(landed)
+            if not self._should_follow_url(landed) and not self._is_login_page(landed):
+                logger.info("Not exploring %s: it redirected to %s", url, landed)
+                return False
 
             dom_hash = await self.get_dom_hash(page)
             if dom_hash and self.dom_hasher.is_dom_seen(dom_hash):

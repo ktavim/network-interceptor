@@ -1,6 +1,6 @@
 """Classify interactive elements: destructive actions, date pickers, clickables."""
 import logging
-from typing import Iterable, List
+from typing import Callable, Iterable, List, Optional
 
 from playwright.async_api import Page, Locator
 
@@ -58,6 +58,22 @@ async def is_destructive_action(element, text: str = "", exclude_patterns: Itera
         return True
 
     return False
+
+
+async def link_target(element) -> str:
+    """The absolute URL a click on `element` follows, or "" when it is in no link.
+
+    Resolved by the browser (el.href), so a relative href and a <base> tag come
+    out as a real click would navigate. A button nested in a link follows the
+    link too, hence closest(). An SVG <a>'s href is not a string and is ignored.
+    """
+    try:
+        return await element.evaluate('''el => {
+            const a = el.closest('a[href]');
+            return a && typeof a.href === 'string' ? a.href : '';
+        }''') or ""
+    except Exception:
+        return ""
 
 
 async def is_date_picker_element(element) -> bool:
@@ -142,10 +158,23 @@ async def get_clickable_elements(
     page: Page,
     max_clicks: int,
     exclude_patterns: Iterable[str] = (),
+    href_allowed: Optional[Callable[[str], bool]] = None,
 ) -> List[Locator]:
-    """Get all clickable elements on current page, filtered and deduplicated."""
+    """Get all clickable elements on current page, filtered and deduplicated.
+
+    With `href_allowed`, an element inside a link is kept only when it accepts
+    the link's URL, so links the crawl would not follow don't use up max_clicks.
+    """
     all_elements: List[Locator] = []
     seen_elements = set()
+
+    # The reachability check below assumes the page sits at the scroll origin,
+    # but form filling scrolls to each field it fills: left scrolled down, the
+    # whole header and nav would read as off the top and be dropped.
+    try:
+        await page.evaluate('window.scrollTo(0, 0)')
+    except Exception:
+        pass
 
     for selector in CLICKABLE_SELECTORS:
         try:
@@ -192,6 +221,11 @@ async def get_clickable_elements(
                                 return true;
                             }''')
 
+                            if is_clickable and href_allowed is not None:
+                                href = await link_target(elem)
+                                if href and not href_allowed(href):
+                                    logger.debug("Skipping link the crawl won't follow: %s", href)
+                                    continue
                             if is_clickable and not await is_destructive_action(locator, exclude_patterns=exclude_patterns):
                                 if await is_date_picker_element(elem):
                                     logger.debug("Skipping date picker element")

@@ -82,7 +82,8 @@ def mock_page():
 def mock_request():
     """Factory for a mock Playwright Request."""
     def _mock_request(method="GET", url="http://api.example.com/v1/test",
-                      headers=None, resource_type="fetch", failure=None, post_data=None):
+                      headers=None, resource_type="fetch", failure=None, post_data=None,
+                      navigation=False, frame=None, redirected_from=None):
         req = MagicMock()
         req.method = method
         req.url = url
@@ -90,6 +91,9 @@ def mock_request():
         req.resource_type = resource_type
         req.failure = failure
         req.post_data = post_data
+        req.is_navigation_request = MagicMock(return_value=navigation)
+        req.frame = frame if frame is not None else MagicMock()
+        req.redirected_from = redirected_from
         return req
     return _mock_request
 

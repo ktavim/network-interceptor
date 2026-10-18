@@ -11,7 +11,7 @@ from .auth import is_on_login_page, perform_login, storage_state_valid
 from .navigation import NavigationHandler
 from .navigation.dom_hasher import DOMHasher
 from .navigation.selectors import INTERACTIVE_SELECTORS, POPUP_CONTAINER_SELECTORS
-from .network import NetworkInterceptor, RequestCapture, WriteGuard
+from .network import NavigationGuard, NetworkInterceptor, RequestCapture, WriteGuard
 from .network.auth_analyzer import aggregate_by_origin
 from .network.resolver import resolve_hosts
 from .origin import Origin, origin_of
@@ -28,6 +28,7 @@ class Mapper:
         self.config = config
         self.interceptor = NetworkInterceptor()
         self.write_guard = WriteGuard(config)
+        self.navigation_guard = NavigationGuard(config)
         self.dom_hasher = DOMHasher()
         self.navigator = NavigationHandler(config, self.dom_hasher)
         self.playwright = None
@@ -39,6 +40,12 @@ class Mapper:
         self._on_event: Optional[EventCallback] = on_event
         self._pages_visited: int = 0
         self._announced_origins: set[Origin] = set()
+        # Depth of the page being explored, so a tab opened by one of its
+        # clicks is crawled as that page's child.
+        self._exploring_depth: int = 0
+        # (url, depth of the page that opened it) for app pages that opened in
+        # a new tab; _follow_links_on_page visits them in the main tab.
+        self._opened_tabs: list[tuple[str, int]] = []
 
     async def _emit(self, event_type: str, payload: Dict[str, Any]) -> None:
         if not self._on_event:
@@ -108,10 +115,48 @@ class Mapper:
         self.context = await self.browser.new_context(**context_kwargs)
         # Before the first page exists, so no request goes out unguarded.
         await self.write_guard.attach(self.context)
+        await self.navigation_guard.attach(self.context)
         self.page = await self.context.new_page()
 
         self._capture = RequestCapture(self.interceptor, self.config.start_url, self.write_guard)
         self._capture.attach(self.page, self.context)
+        self.context.on('page', self._handle_new_tab)
+
+    async def _handle_new_tab(self, page: Page) -> None:
+        """Close a tab the crawl opened, queueing it for the main tab if it's an app page.
+
+        The crawl only drives self.page, so another tab is never explored; left
+        open, it keeps loading and polling for the rest of the scan. An app
+        page that opened in one is still worth crawling, so its URL goes to
+        _follow_links_on_page, which runs it through the same visited-URL,
+        DOM-hash and depth checks as a link.
+        """
+        if page is self.page:
+            return
+        # A new tab starts on about:blank; its first real URL arrives on commit,
+        # after any redirects.
+        try:
+            if page.url == 'about:blank':
+                await page.wait_for_event(
+                    'framenavigated',
+                    predicate=lambda frame: frame == page.main_frame and frame.url != 'about:blank',
+                    timeout=self.config.wait_timeout,
+                )
+        except Exception as e:
+            logger.debug("New tab never left about:blank: %s", e)
+        url = page.url
+        if self.navigator._should_follow_url(url):
+            self._opened_tabs.append((url, self._exploring_depth))
+        logger.debug("Closing tab opened at %s", url)
+        try:
+            await page.close()
+        except Exception as e:
+            logger.debug("Could not close tab at %s: %s", url, e)
+
+    def _take_opened_tabs(self, depth: int) -> list[str]:
+        taken = [url for url, d in self._opened_tabs if d == depth]
+        self._opened_tabs = [(url, d) for url, d in self._opened_tabs if d != depth]
+        return taken
 
     async def map_website(self) -> Dict[str, Any]:
         logger.info("Starting external-services mapping for: %s", self.config.start_url)
@@ -128,6 +173,8 @@ class Mapper:
         logger.info("Mapping complete. Found %d external services.", len(external_services))
         if self.write_guard.blocked_count:
             logger.info("Write guard blocked %d state-changing requests.", self.write_guard.blocked_count)
+        if self.navigation_guard.blocked_count:
+            logger.info("Navigation guard blocked %d off-site navigations.", self.navigation_guard.blocked_count)
 
         ips_by_host = await resolve_hosts(e['host'] for e in external_services)
         for entry in external_services:
@@ -150,8 +197,9 @@ class Mapper:
             return
 
         # The login form POSTs, and so may the redirect chain back to the app
-        # (SAML POST binding, OIDC form_post).
-        with self.write_guard.allow_writes():
+        # (SAML POST binding, OIDC form_post). That chain may also pass through
+        # hosts other than the app and the login URL's.
+        with self.write_guard.allow_writes(), self.navigation_guard.allow_offsite():
             try:
                 await perform_login(page, cfg, self.config.start_url)
             except Exception as e:
@@ -169,6 +217,7 @@ class Mapper:
     async def _explore_page(self, page: Page, depth: int) -> None:
         if depth >= self.config.max_depth:
             return
+        self._exploring_depth = depth
 
         # Fresh page: clear any 'blocked by unclearable overlay' state carried over
         # from a previously stuck page (this path also covers click-induced
@@ -231,6 +280,11 @@ class Mapper:
         logger.debug("Clicking element %d/%d of depth %d%s", i + 1, total, depth, label)
 
     async def _maybe_explore_new_url(self, page: Page, current_url: str, depth: int) -> None:
+        if depth + 1 >= self.config.max_depth:
+            # Too deep to explore. Marking it visited or seen would stop a
+            # shallower page that links to it from exploring it later.
+            logger.debug("Not exploring %s: past max_depth", current_url)
+            return
         should_follow = self.navigator._should_follow_url(current_url)
         if should_follow and current_url not in self.navigator.visited_urls:
             dom_hash = await self.dom_hasher.get_dom_hash(page)
@@ -244,6 +298,7 @@ class Mapper:
             self.navigator.clicks_on_current_page = 0
             await self._explore_page(page, depth + 1)
             self.navigator.clicks_on_current_page = saved_clicks
+            self._exploring_depth = depth
         elif not should_follow:
             logger.debug("Skipping external/excluded URL: %s", current_url)
 
@@ -298,6 +353,8 @@ class Mapper:
                 return
             if await self.navigator.is_destructive_action(el):
                 return
+            if not await self.navigator.link_target_allowed(page, el):
+                return
 
             label = ''
             try:
@@ -316,7 +373,9 @@ class Mapper:
             logger.warning("  Could not click popup element: %s", e)
 
     async def _follow_links_on_page(self, page: Page, depth: int) -> None:
-        if depth >= self.config.max_depth:
+        # The linked pages would sit at depth + 1. Past max_depth they would not
+        # be explored, and loading one would still mark it visited.
+        if depth + 1 >= self.config.max_depth:
             return
 
         try:
@@ -327,14 +386,15 @@ class Mapper:
             #
             # Read the resolved el.href (absolute) rather than the raw attribute so
             # same-host relative links (e.g. Confluence's "/display/...") are followed
-            # instead of being rejected by _should_follow_url, which compares netloc
+            # instead of being rejected by _should_follow_url, which compares origins
             # and would treat a relative URL as host-less. el.href also honours any
             # <base> tag, matching what a real click would navigate to.
             hrefs = await page.eval_on_selector_all(
                 'a[href]:not([class*="skip-link"])',
                 'els => els.map(el => el.href)',
             )
-            for href in hrefs[:10]:
+            # Plus the app pages this page's clicks opened in new tabs.
+            for href in hrefs[:10] + self._take_opened_tabs(depth):
                 try:
                     if not href or href in self.navigator.visited_urls:
                         continue
@@ -346,6 +406,7 @@ class Mapper:
                         self.navigator.clicks_on_current_page = 0
                         await self._explore_page(page, depth + 1)
                         self.navigator.clicks_on_current_page = saved_clicks
+                        self._exploring_depth = depth
                         if depth > 0:
                             try:
                                 await page.go_back(wait_until='load', timeout=self.config.wait_timeout)

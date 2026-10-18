@@ -2,7 +2,7 @@
 import logging
 
 import pytest
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, PropertyMock
 
 from crawler.network import NetworkInterceptor, RequestCapture, WriteGuard
 from crawler.network.write_guard import BLOCKED_FAILURE_REASON
@@ -290,3 +290,171 @@ class TestOnRequestFailed:
         assert len(interceptor.requests) == 1
         assert interceptor.requests[0]["status"] == 200
         assert capture.failed_records == {}
+
+
+class TestIssuingPageFilter:
+    async def test_request_from_an_off_site_page_is_not_recorded(
+        self, capture, interceptor, mock_request, mock_response, mock_page
+    ):
+        page = mock_page("https://github.com/org/repo")
+        req = mock_request(url="https://github.githubassets.com/app.js")
+        await capture._on_request(req, page=page)
+        resp = mock_response(200)
+        resp.request = req
+        await capture._on_response(resp, page=page)
+        await capture._on_request_finished(req, page=page)
+
+        assert capture.pending_requests == {}
+        assert interceptor.requests == []
+
+    async def test_off_site_request_stays_dropped_after_the_page_returns(
+        self, capture, interceptor, mock_request, mock_page
+    ):
+        # Going back to the app aborts what the off-site page had in flight;
+        # the failure lands with page.url on the app again.
+        page = mock_page("https://github.com/org/repo")
+        req = mock_request(url="https://github.githubassets.com/app.js", failure="net::ERR_ABORTED")
+        await capture._on_request(req, page=page)
+
+        page.url = "http://localhost:8080/home"
+        await capture._on_request_failed(req, page=page)
+
+        assert interceptor.requests == []
+        assert capture.failed_records == {}
+
+    async def test_dropped_request_leaves_an_app_request_for_the_same_url(
+        self, capture, interceptor, mock_request, mock_page
+    ):
+        app_page = mock_page("http://localhost:8080/home")
+        off_site = mock_page("https://github.com/org/repo")
+        from_app = mock_request(url="https://fonts.example.com/a.woff")
+        from_off_site = mock_request(url="https://fonts.example.com/a.woff", failure="net::ERR_ABORTED")
+        await capture._on_request(from_app, page=app_page)
+        await capture._on_request(from_off_site, page=off_site)
+        await capture._on_request_failed(from_off_site, page=off_site)
+
+        assert ("GET", "https://fonts.example.com/a.woff") in capture.pending_requests
+        assert interceptor.requests == []
+
+    async def test_response_without_request_event_is_judged_by_its_page(
+        self, capture, interceptor, mock_request, mock_response, mock_page
+    ):
+        req = mock_request(url="https://github.githubassets.com/app.js")
+        resp = mock_response(200)
+        resp.request = req
+        await capture._on_response(resp, page=mock_page("https://github.com/org/repo"))
+        assert interceptor.requests == []
+
+    async def test_failure_without_request_event_is_judged_by_its_page(
+        self, capture, interceptor, mock_request, mock_page
+    ):
+        req = mock_request(url="https://github.githubassets.com/app.js", failure="net::ERR_ABORTED")
+        await capture._on_request_failed(req, page=mock_page("https://github.com/org/repo"))
+        assert interceptor.requests == []
+
+    async def test_new_tab_still_on_about_blank_is_not_the_app(self, capture, mock_request, mock_page):
+        req = mock_request(url="https://api.example.com/v1")
+        await capture._on_request(req, page=mock_page("about:blank"))
+        assert capture.pending_requests == {}
+
+    async def test_link_navigation_off_site_is_not_recorded(self, capture, mock_request, mock_page):
+        # page.url still names the app page the click is leaving.
+        page = mock_page("http://localhost:8080/home")
+        req = mock_request(url="https://github.com/org/repo", resource_type="document",
+                           navigation=True, frame=page.main_frame)
+        await capture._on_request(req, page=page)
+        assert capture.pending_requests == {}
+
+    async def test_redirect_from_the_app_to_its_idp_is_recorded(self, capture, mock_request, mock_page):
+        page = mock_page("http://localhost:8080/home")
+        app_hop = mock_request(url="http://localhost:8080/login", resource_type="document",
+                               navigation=True, frame=page.main_frame)
+        idp_hop = mock_request(url="https://idp.example.com/authorize", resource_type="document",
+                               navigation=True, frame=page.main_frame, redirected_from=app_hop)
+        await capture._on_request(idp_hop, page=page)
+        assert ("GET", "https://idp.example.com/authorize") in capture.pending_requests
+
+    async def test_redirect_chain_started_off_site_is_not_recorded(self, capture, mock_request, mock_page):
+        page = mock_page("http://localhost:8080/home")
+        first = mock_request(url="https://t.co/abc", resource_type="document",
+                             navigation=True, frame=page.main_frame)
+        second = mock_request(url="https://github.com/org/repo", resource_type="document",
+                              navigation=True, frame=page.main_frame, redirected_from=first)
+        await capture._on_request(second, page=page)
+        assert capture.pending_requests == {}
+
+    async def test_iframe_on_an_app_page_is_recorded(self, capture, mock_request, mock_page):
+        # An embedded widget is a dependency of the app that embeds it.
+        page = mock_page("http://localhost:8080/checkout")
+        req = mock_request(url="https://js.stripe.com/v3/elements", resource_type="document",
+                           navigation=True, frame=MagicMock())
+        await capture._on_request(req, page=page)
+        assert ("GET", "https://js.stripe.com/v3/elements") in capture.pending_requests
+
+    async def test_request_with_no_frame_is_judged_by_its_page(self, capture, mock_request, mock_page):
+        req = mock_request(url="https://api.example.com/v1", navigation=True)
+        type(req).frame = PropertyMock(side_effect=Exception("Service Worker requests do not have an associated frame."))
+        await capture._on_request(req, page=mock_page("http://localhost:8080/home"))
+        assert ("GET", "https://api.example.com/v1") in capture.pending_requests
+
+
+class TestDedupByStoredUrl:
+    async def test_same_endpoint_with_new_query_strings_is_one_record(
+        self, capture, interceptor, mock_request, mock_response, mock_page
+    ):
+        # Analytics beacons: one endpoint, a fresh query string per hit.
+        page = mock_page("http://localhost:8080/home")
+        for i in range(3):
+            req = mock_request(method="POST", url=f"https://www.google-analytics.com/g/collect?v=2&_p={i}")
+            await capture._on_request(req, page=page)
+            resp = mock_response(204)
+            resp.request = req
+            await capture._on_response(resp, page=page)
+
+        assert len(interceptor.requests) == 1
+        assert interceptor.requests[0]["url"] == "https://www.google-analytics.com/g/collect"
+
+    async def test_blocked_hits_with_new_query_strings_are_one_record(
+        self, capture, interceptor, mock_request, mock_page
+    ):
+        page = mock_page("http://localhost:8080/home")
+        for i in range(3):
+            req = mock_request(method="POST", url=f"https://www.google-analytics.com/g/collect?_p={i}",
+                               failure="net::ERR_BLOCKED_BY_CLIENT")
+            await capture._on_request(req, page=page)
+            await capture._on_request_failed(req, page=page)
+
+        assert len(interceptor.requests) == 1
+        assert capture.pending_requests == {}
+
+    async def test_response_for_another_query_replaces_the_failure(
+        self, capture, interceptor, mock_request, mock_response, mock_page
+    ):
+        page = mock_page("http://localhost:8080/home")
+        failed = mock_request(url="http://api.example.com/v1/items?page=1", failure="net::ERR_ABORTED")
+        await capture._on_request(failed, page=page)
+        await capture._on_request_failed(failed, page=page)
+
+        answered = mock_request(url="http://api.example.com/v1/items?page=2")
+        await capture._on_request(answered, page=page)
+        resp = mock_response(401, {"WWW-Authenticate": "Bearer"})
+        resp.request = answered
+        await capture._on_response(resp, page=page)
+
+        assert len(interceptor.requests) == 1
+        assert interceptor.requests[0]["status"] == 401
+
+    async def test_other_methods_and_paths_stay_separate(
+        self, capture, interceptor, mock_request, mock_response, mock_page
+    ):
+        page = mock_page("http://localhost:8080/home")
+        for method, url in [("GET", "http://api.example.com/v1/items?a=1"),
+                            ("POST", "http://api.example.com/v1/items?a=1"),
+                            ("GET", "http://api.example.com/v1/users?a=1")]:
+            req = mock_request(method=method, url=url)
+            await capture._on_request(req, page=page)
+            resp = mock_response(200)
+            resp.request = req
+            await capture._on_response(resp, page=page)
+
+        assert len(interceptor.requests) == 3

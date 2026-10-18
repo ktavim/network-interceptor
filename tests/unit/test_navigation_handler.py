@@ -159,6 +159,49 @@ class TestNavigateTo:
         with patch.object(handler.dom_hasher, "get_dom_hash", AsyncMock(return_value="h1")):
             assert await handler.navigate_to(page, "http://localhost:8080/dup") is False
 
+    @staticmethod
+    def _redirecting_page(mock_page, landed):
+        page = mock_page()
+
+        async def goto(*args, **kwargs):
+            page.url = landed
+
+        page.goto.side_effect = goto
+        return page
+
+    async def test_redirect_off_site_is_not_explored(self, make_config, mock_page):
+        handler = NavigationHandler(make_config())
+        page = self._redirecting_page(mock_page, "https://github.com/org/repo")
+        with patch.object(handler.dom_hasher, "get_dom_hash", AsyncMock(return_value="h1")):
+            assert await handler.navigate_to(page, "http://localhost:8080/out") is False
+        assert not handler.dom_hasher.is_dom_seen("h1")
+
+    async def test_redirect_to_an_excluded_page_is_not_explored(self, make_config, mock_page):
+        handler = NavigationHandler(make_config())
+        page = self._redirecting_page(mock_page, "http://localhost:8080/logout")
+        assert await handler.navigate_to(page, "http://localhost:8080/bye") is False
+
+    async def test_redirect_within_the_app_is_explored_and_both_urls_visited(self, make_config, mock_page):
+        handler = NavigationHandler(make_config())
+        page = self._redirecting_page(mock_page, "http://localhost:8080/b")
+        with patch.object(handler.dom_hasher, "get_dom_hash", AsyncMock(return_value="h1")):
+            assert await handler.navigate_to(page, "http://localhost:8080/a") is True
+        assert {"http://localhost:8080/a", "http://localhost:8080/b"} <= handler.visited_urls
+
+    @pytest.mark.parametrize("login_url", [
+        "https://sso.example.com/realms/corp",   # off-origin IdP
+        "http://localhost:8080/login",           # on the app, but "login" is an exclude pattern
+    ])
+    async def test_redirect_to_the_login_page_counts_as_arriving(self, make_config, mock_page, login_url):
+        # Mapper logs in from there; refusing it would end the scan at the start URL.
+        from config_loader import LoginConfig
+        cfg = make_config(exclude_patterns=["logout", "login"],
+                          login=LoginConfig(login_url=login_url, username="u", password="p"))
+        handler = NavigationHandler(cfg)
+        page = self._redirecting_page(mock_page, login_url + "?next=%2F")
+        with patch.object(handler.dom_hasher, "get_dom_hash", AsyncMock(return_value="h1")):
+            assert await handler.navigate_to(page, "http://localhost:8080/") is True
+
     async def test_goto_exception_returns_false(self, make_config, mock_page):
         handler = NavigationHandler(make_config())
         page = mock_page()
@@ -247,3 +290,57 @@ class TestOverlayBlockGuard:
         handler.overlay.handle.assert_called_once()
         element.click.assert_called_once_with(timeout=3000)
         assert handler.page_overlay_blocked is False
+
+
+class TestShouldClickHref:
+    @pytest.fixture
+    def handler(self, make_config):
+        return NavigationHandler(make_config(start_url="http://localhost:8080"))
+
+    CURRENT = "http://localhost:8080/orders"
+
+    def test_unvisited_app_link_is_clicked(self, handler):
+        assert handler.should_click_href("http://localhost:8080/invoices", self.CURRENT) is True
+
+    def test_off_site_link_is_not_clicked(self, handler):
+        assert handler.should_click_href("https://github.com/org/repo", self.CURRENT) is False
+
+    def test_excluded_link_is_not_clicked(self, handler):
+        assert handler.should_click_href("http://localhost:8080/logout", self.CURRENT) is False
+
+    def test_visited_link_is_not_clicked(self, handler):
+        handler.visited_urls.add("http://localhost:8080/invoices")
+        assert handler.should_click_href("http://localhost:8080/invoices", self.CURRENT) is False
+
+    @pytest.mark.parametrize("href", [
+        "http://localhost:8080/orders#",          # href="#" behind a script
+        "http://localhost:8080/orders#details",   # in-page anchor or tab
+        "http://localhost:8080/orders",           # href=""
+    ])
+    def test_link_into_the_current_document_is_clicked(self, handler, href):
+        # Visited, but the click opens a menu or tab rather than navigating.
+        handler.visited_urls.add(self.CURRENT)
+        assert handler.should_click_href(href, self.CURRENT) is True
+
+    def test_javascript_link_is_clicked(self, handler):
+        assert handler.should_click_href("javascript:void(0)", self.CURRENT) is True
+
+    @pytest.mark.parametrize("href", ["mailto:a@example.com", "tel:+15550100"])
+    def test_non_web_link_is_not_clicked(self, handler, href):
+        assert handler.should_click_href(href, self.CURRENT) is False
+
+    async def test_element_outside_any_link_is_allowed(self, handler, mock_page, mock_element):
+        assert await handler.link_target_allowed(mock_page(self.CURRENT), mock_element(evaluate_result="")) is True
+
+    async def test_element_in_an_off_site_link_is_not_allowed(self, handler, mock_page, mock_element):
+        el = mock_element(evaluate_result="https://github.com/org/repo")
+        assert await handler.link_target_allowed(mock_page(self.CURRENT), el) is False
+
+    async def test_clickables_are_filtered_against_the_page_they_were_found_on(self, handler, mock_page):
+        page = mock_page(self.CURRENT)
+        with patch("crawler.navigation.handler.element_classifier.get_clickable_elements",
+                   AsyncMock(return_value=[])) as get:
+            await handler.get_clickable_elements(page)
+        href_allowed = get.call_args.kwargs["href_allowed"]
+        assert href_allowed("http://localhost:8080/orders#tab") is True
+        assert href_allowed("https://github.com/") is False
