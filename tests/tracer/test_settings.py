@@ -22,11 +22,12 @@ def test_each_field_is_read_from_its_variable():
         "PROBE_CONCURRENCY": "4",
         "DNS_TIMEOUT_S": "1.5",
         "DNS_CONCURRENCY": "8",
+        "DNS_SINKHOLE_IPS": "10.255.255.1",
     })
     assert settings == ScanSettings(
         nav_timeout_ms=10000, wait_after_load_ms=1000, interact_budget_ms=2000,
         follow_links=True, max_pages=7, probe_timeout_s=2.5, probe_concurrency=4,
-        dns_timeout_s=1.5, dns_concurrency=8,
+        dns_timeout_s=1.5, dns_concurrency=8, dns_sinkhole_ips=("10.255.255.1",),
     )
     # Every field has a variable: none is left that only code can set.
     assert settings.model_dump().keys() == ScanSettings.model_fields.keys()
@@ -48,7 +49,34 @@ def test_defaults_to_the_process_environment(monkeypatch):
     ("SCAN_MAX_PAGES", ""),
     ("PROBE_TIMEOUT_S", "-1"),
     ("SCAN_FOLLOW_LINKS", "perhaps"),
+    ("DNS_SINKHOLE_IPS", "sinkhole.corp"),
+    ("DNS_SINKHOLE_IPS", "10.255.255.1,10.255.255.256"),
 ])
 def test_value_its_field_refuses_raises(variable, value):
     with pytest.raises(ValidationError):
         ScanSettings.from_env({variable: value})
+
+
+def test_sinkhole_ips_default_to_none():
+    assert ScanSettings.from_env({}).dns_sinkhole_ips == ()
+    assert ScanSettings.from_env({"DNS_SINKHOLE_IPS": " "}).dns_sinkhole_ips == ()
+
+
+def test_sinkhole_ips_are_comma_separated_in_the_environment():
+    """Normalized as getaddrinfo spells them, deduplicated, sorted."""
+    settings = ScanSettings.from_env(
+        {"DNS_SINKHOLE_IPS": " 10.255.255.1, fd00:0::1 ,10.255.255.1,"})
+    assert settings.dns_sinkhole_ips == ("10.255.255.1", "fd00::1")
+
+
+def test_sinkhole_ips_survive_the_snapshot_round_trip():
+    """The tracer job stores model_dump(mode="json"); the worker re-hydrates it."""
+    settings = ScanSettings(dns_sinkhole_ips=("fd00::1", "10.255.255.1"))
+    assert ScanSettings.model_validate(settings.model_dump(mode="json")) == settings
+
+
+def test_scan_settings_snapshot_without_sinkhole_still_loads():
+    """A scan requested before the field existed re-hydrates with no sinkhole."""
+    snapshot = ScanSettings().model_dump(mode="json")
+    del snapshot["dns_sinkhole_ips"]
+    assert ScanSettings.model_validate(snapshot).dns_sinkhole_ips == ()

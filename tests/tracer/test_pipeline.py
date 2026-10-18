@@ -13,7 +13,7 @@ import pytest
 from config_tracer import pipeline
 from config_tracer.extract import _classify_url
 from config_tracer.models import AuthMethod, ConfigSource, Origin
-from config_tracer.pipeline import _resolve_and_probe, run_scan
+from config_tracer.pipeline import _drop_hosts, _resolve_and_probe, run_scan
 from config_tracer.report import ScanReport, build_report
 from config_tracer.settings import ScanSettings
 
@@ -134,10 +134,12 @@ def _to(target: str) -> str:
     return quote(target, safe="")
 
 
-async def _scan_seed(*seeds: str) -> ScanReport:
-    auth_map, unresolved, ip_map, probe_srcs = await _resolve_and_probe(list(seeds), FAST)
+async def _scan_seed(*seeds: str, settings: ScanSettings = FAST) -> ScanReport:
+    auth_map, unresolved, ip_map, probe_srcs, sinkholed = await _resolve_and_probe(
+        list(seeds), settings)
     sources = [ConfigSource(origin="network: seed", urls_found=list(seeds))] + probe_srcs
-    return build_report(sources, auth_map, unresolved, ip_map)
+    kept, _ = _drop_hosts(sources, sinkholed)
+    return build_report(kept, auth_map, unresolved, ip_map)
 
 
 @pytest.mark.asyncio
@@ -236,7 +238,7 @@ async def test_cross_origin_redirect_loop_terminates(auth_server, gated_auth_ser
 async def test_same_origin_redirect_adds_nothing(auth_server):
     """A redirect within one origin names a service already in the report."""
     seed = f"{auth_server}/auth/redirect"          # 301 -> /somewhere-else
-    _, _, _, probe_srcs = await _resolve_and_probe([seed], FAST)
+    _, _, _, probe_srcs, _ = await _resolve_and_probe([seed], FAST)
     assert probe_srcs == []
 
     report = await _scan_seed(seed)
@@ -284,3 +286,93 @@ async def test_redirect_hops_are_capped(auth_server, gated_auth_server, monkeypa
     assert set(placed) == {seed, middle}
     assert placed[middle].location == last
     assert "1 target(s) not followed" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# DNS sinkhole: on a network whose DNS answers every unknown name with one
+# placeholder address, a host resolving only to it is dropped, never probed.
+# ---------------------------------------------------------------------------
+
+_SINKHOLE = "10.255.255.1"
+SINKHOLED = FAST.model_copy(update={"dns_sinkhole_ips": (_SINKHOLE,)})
+
+
+def _fake_dns(answers: dict[str, list[str]]):
+    async def resolve(hosts, timeout, max_concurrent):
+        return [], {h: answers.get(h, ["127.0.0.1"]) for h in hosts}
+    return resolve
+
+
+@pytest.mark.asyncio
+async def test_run_scan_drops_sinkholed_hosts(auth_server, monkeypatch, caplog):
+    """URLs on a host resolving only to the sinkhole are dropped from JS and
+    JSON sources alike, are never probed, and are logged. A host with a real
+    address beside the placeholder is kept and probed."""
+    port = auth_server.rsplit(":", 1)[1]
+    internal = f"{auth_server}/auth/none"
+    mixed = f"http://mixed.test:{port}/auth/none"
+    cdn = "https://cdn.public.test/lib.js"
+    api = "https://api.public.test/v1"
+
+    async def fake_crawl(seeds, **kwargs):
+        return [
+            ConfigSource(origin="js: https://app/main.js", urls_found=[internal, cdn]),
+            ConfigSource(origin="json: https://app/config.json", urls_found=[api, cdn]),
+            ConfigSource(origin="json: https://app/env.json", urls_found=[mixed]),
+        ]
+
+    probed: list[str] = []
+    real_probe = pipeline.probe_urls_with_roots
+
+    async def recording_probe(urls, **kwargs):
+        probed.extend(urls)
+        return await real_probe(urls, **kwargs)
+
+    monkeypatch.setattr(pipeline, "crawl", fake_crawl)
+    monkeypatch.setattr(pipeline, "resolve_hosts", _fake_dns({
+        "cdn.public.test": [_SINKHOLE],
+        "api.public.test": [_SINKHOLE],
+        "mixed.test": ["127.0.0.1", _SINKHOLE],
+    }))
+    monkeypatch.setattr(pipeline, "probe_urls_with_roots", recording_probe)
+    with caplog.at_level(logging.DEBUG, logger="config_tracer.pipeline"):
+        report = await run_scan(["https://app"], SINKHOLED)
+
+    assert sorted(probed) == sorted([internal, mixed])
+    assert _placed_urls(report) == {internal, mixed}
+    assert report.service_map[_key(mixed)].ips == ["127.0.0.1", _SINKHOLE]
+    messages = [r.getMessage() for r in caplog.records]
+    assert ("Dropped 2 URL(s) on 2 host(s) resolving only to the DNS sinkhole: "
+            "api.public.test, cdn.public.test") in messages
+    assert (f"Dropped sinkholed URL {cdn}; found in "
+            "js: https://app/main.js, json: https://app/config.json") in messages
+
+
+@pytest.mark.asyncio
+async def test_sinkholed_host_kept_without_sinkhole_configured(monkeypatch):
+    """With no sinkhole configured, the placeholder is an address like any
+    other: the host is a service and is probed."""
+    target = "https://cdn.public.test/lib.js"
+    monkeypatch.setattr(pipeline, "resolve_hosts",
+                        _fake_dns({"cdn.public.test": [_SINKHOLE]}))
+    report = await _scan_seed(target)
+
+    svc = report.service_map[_key(target)]
+    assert svc.ips == [_SINKHOLE]
+    assert svc.urls_probed == 1
+
+
+@pytest.mark.asyncio
+async def test_sinkholed_redirect_target_is_dropped(auth_server, monkeypatch):
+    """A redirect target on a sinkholed host is not a service; the redirecting
+    URL keeps its own verdict and the target in `location`."""
+    monkeypatch.setattr(pipeline, "resolve_hosts",
+                        _fake_dns({"login.public.test": [_SINKHOLE]}))
+    target = "https://login.public.test/authorize"
+    seed = f"{auth_server}/auth/redirect-to?to={_to(target)}"
+    report = await _scan_seed(seed, settings=SINKHOLED)
+
+    assert set(report.service_map) == {_key(seed)}
+    evidence = report.service_map[_key(seed)].url_map[seed]
+    assert evidence.location == target
+    assert evidence.sources == ["network: seed"]

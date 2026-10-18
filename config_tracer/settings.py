@@ -1,9 +1,10 @@
 """The per-scan tuning snapshot that travels with each scan's tracer job."""
 
+import ipaddress
 import os
 from collections.abc import Mapping
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 # The environment variable behind each field, named as config-tracer named them.
 _ENV_VARS = {
@@ -16,6 +17,7 @@ _ENV_VARS = {
     "probe_concurrency": "PROBE_CONCURRENCY",
     "dns_timeout_s": "DNS_TIMEOUT_S",
     "dns_concurrency": "DNS_CONCURRENCY",
+    "dns_sinkhole_ips": "DNS_SINKHOLE_IPS",
 }
 
 
@@ -36,6 +38,19 @@ class ScanSettings(BaseModel):
     probe_concurrency: int = Field(10, ge=1, description="Max concurrent probe requests")
     dns_timeout_s: float = Field(3.0, gt=0, description="Per-host DNS resolution timeout")
     dns_concurrency: int = Field(20, ge=1, description="Max concurrent DNS lookups")
+    dns_sinkhole_ips: tuple[str, ...] = Field(
+        (), description="Placeholder addresses the DNS answers for public names "
+                        "on an air-gapped network; a host resolving only to these is dropped")
+
+    @field_validator("dns_sinkhole_ips", mode="before")
+    @classmethod
+    def _normalize_sinkhole_ips(cls, v):
+        """Comma-separated in the environment (DNS_SINKHOLE_IPS=10.255.255.1,fd00::1).
+        Canonical, sorted, distinct, so they compare equal to what getaddrinfo
+        returns (`fd00:0::1` and `fd00::1` are one address)."""
+        if isinstance(v, str):
+            v = v.split(",")
+        return tuple(sorted({str(ipaddress.ip_address(part.strip())) for part in v if part.strip()}))
 
     @classmethod
     def from_env(cls, environ: Mapping[str, str] | None = None) -> "ScanSettings":
