@@ -20,6 +20,33 @@ def _clean_url(url: str) -> str:
     return url.rstrip(".,;:)\\")
 
 
+# Identifiers spelled as URLs: XML namespaces (SVG, XHTML, XLink, MathML, XML
+# Schema, RDF, SOAP, Office Open XML, XMP), as rendering code names them in
+# createElementNS / setAttributeNS, and JSON Schema `$schema` ids. Nothing is
+# ever fetched from them, so they name no service. Matched by host and path
+# prefix, after the scheme, lower-cased.
+_NAMESPACE_PREFIXES = tuple(p.lower() for p in (
+    "www.w3.org/1998/Math/MathML",
+    "www.w3.org/1999/",                 # xhtml, xlink, 02/22-rdf-syntax-ns
+    "www.w3.org/2000/",                 # svg, xmlns/, 09/xmldsig
+    "www.w3.org/2001/",                 # XMLSchema, XMLSchema-instance, 04/xmlenc
+    "www.w3.org/2005/Atom",
+    "www.w3.org/XML/1998/namespace",
+    "www.w3.org/ns/",
+    "schemas.xmlsoap.org/",
+    "schemas.microsoft.com/",
+    "schemas.openxmlformats.org/",
+    "ns.adobe.com/",
+    "purl.org/dc/",
+    "json-schema.org/",
+))
+
+
+def _is_namespace_uri(url: str) -> bool:
+    rest = url.lower().removeprefix("http://").removeprefix("https://")
+    return rest.startswith(_NAMESPACE_PREFIXES)
+
+
 _VALID_HOSTNAME_CHARS = set(string.ascii_letters + string.digits + ".-")
 
 
@@ -49,7 +76,8 @@ def _partition_urls(urls: list[str]) -> tuple[list[str], list[tuple[str, str]]]:
 
 
 def extract_urls(obj, seen: set[str] | None = None) -> list[str]:
-    """Recursively extract http/https URLs from a parsed JSON structure."""
+    """Recursively extract http/https URLs from a parsed JSON structure,
+    leaving out namespace URIs."""
     if seen is None:
         seen = set()
     urls: list[str] = []
@@ -57,7 +85,7 @@ def extract_urls(obj, seen: set[str] | None = None) -> list[str]:
     if isinstance(obj, str):
         for m in URL_RE.findall(obj):
             clean = _clean_url(m)
-            if clean not in seen:
+            if clean not in seen and not _is_namespace_uri(clean):
                 seen.add(clean)
                 urls.append(clean)
     elif isinstance(obj, dict):
@@ -70,12 +98,13 @@ def extract_urls(obj, seen: set[str] | None = None) -> list[str]:
 
 
 def extract_urls_from_text(text: str) -> list[str]:
-    """Regex fallback: pull URLs directly from raw text."""
+    """Regex fallback: pull URLs directly from raw text, leaving out namespace
+    URIs."""
     seen: set[str] = set()
     urls: list[str] = []
     for m in URL_RE.findall(text):
         clean = _clean_url(m)
-        if clean not in seen:
+        if clean not in seen and not _is_namespace_uri(clean):
             seen.add(clean)
             urls.append(clean)
     return urls

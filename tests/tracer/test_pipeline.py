@@ -13,7 +13,7 @@ import pytest
 from config_tracer import pipeline
 from config_tracer.extract import _classify_url
 from config_tracer.models import AuthMethod, ConfigSource, Origin
-from config_tracer.pipeline import _drop_hosts, _resolve_and_probe, run_scan
+from config_tracer.pipeline import _drop_hosts, _is_internal, _resolve_and_probe, run_scan
 from config_tracer.report import ScanReport, build_report
 from config_tracer.settings import ScanSettings
 
@@ -376,3 +376,94 @@ async def test_sinkholed_redirect_target_is_dropped(auth_server, monkeypatch):
     evidence = report.service_map[_key(seed)].url_map[seed]
     assert evidence.location == target
     assert evidence.sources == ["network: seed"]
+
+
+# ---------------------------------------------------------------------------
+# Public NXDOMAIN: the same DNS answers other public names with NXDOMAIN, as it
+# does unknown internal ones, so with INTERNAL_DOMAINS set a host outside them
+# that gets NXDOMAIN is public and dropped like a sinkholed one.
+# ---------------------------------------------------------------------------
+
+INTERNAL = SINKHOLED.model_copy(update={"internal_domains": ("corp.test",)})
+
+
+def _failing_dns(errors: dict[str, str]):
+    async def resolve(hosts, timeout, max_concurrent):
+        return ([{"host": h, "error": errors[h]} for h in hosts if h in errors],
+                {h: ["127.0.0.1"] for h in hosts if h not in errors})
+    return resolve
+
+
+@pytest.mark.asyncio
+async def test_public_nxdomain_hosts_are_dropped(auth_server, monkeypatch, caplog):
+    """NXDOMAIN outside the internal domains drops the host, unprobed and
+    logged. NXDOMAIN under one, or on a single-label name, and a SERVFAIL
+    anywhere stay dns_failed findings."""
+    internal = f"{auth_server}/auth/none"
+    public = "http://www.w3.org/TR/html52/"
+    typo = "https://api.corp.test/v1"
+    bare = "https://intranet/home"
+    flaky = "https://cdn.public.test/lib.js"
+
+    async def fake_crawl(seeds, **kwargs):
+        return [ConfigSource(origin="js: https://app/main.js",
+                             urls_found=[internal, public, typo, bare, flaky])]
+
+    probed: list[str] = []
+    real_probe = pipeline.probe_urls_with_roots
+
+    async def recording_probe(urls, **kwargs):
+        probed.extend(urls)
+        return await real_probe(urls, **kwargs)
+
+    monkeypatch.setattr(pipeline, "crawl", fake_crawl)
+    monkeypatch.setattr(pipeline, "resolve_hosts", _failing_dns({
+        "www.w3.org": "NXDOMAIN", "api.corp.test": "NXDOMAIN",
+        "intranet": "NXDOMAIN", "cdn.public.test": "SERVFAIL",
+    }))
+    monkeypatch.setattr(pipeline, "probe_urls_with_roots", recording_probe)
+    with caplog.at_level(logging.DEBUG, logger="config_tracer.pipeline"):
+        report = await run_scan(["https://app"], INTERNAL)
+
+    assert probed == [internal]
+    assert _placed_urls(report) == {internal, typo, bare, flaky}
+    for url in (typo, bare, flaky):
+        assert report.service_map[_key(url)].auth_verdict is AuthMethod.DNS_FAILED
+    messages = [r.getMessage() for r in caplog.records]
+    assert ("Dropped 1 URL(s) on 1 host(s) outside INTERNAL_DOMAINS that got NXDOMAIN: "
+            "www.w3.org") in messages
+    assert f"Dropped public URL {public}; found in js: https://app/main.js" in messages
+
+
+@pytest.mark.asyncio
+async def test_nxdomain_host_kept_without_internal_domains(monkeypatch):
+    """With no internal domains configured, every NXDOMAIN host is a finding."""
+    target = "https://www.w3.org/TR/html52/"
+    monkeypatch.setattr(pipeline, "resolve_hosts", _failing_dns({"www.w3.org": "NXDOMAIN"}))
+    report = await _scan_seed(target, settings=SINKHOLED)
+
+    assert report.service_map[_key(target)].auth_verdict is AuthMethod.DNS_FAILED
+
+
+@pytest.mark.asyncio
+async def test_public_nxdomain_redirect_target_is_dropped(auth_server, monkeypatch):
+    """A redirect target on a public NXDOMAIN host is not a service; the
+    redirecting URL keeps its own verdict and the target in `location`."""
+    monkeypatch.setattr(pipeline, "resolve_hosts",
+                        _failing_dns({"login.public.test": "NXDOMAIN"}))
+    target = "https://login.public.test/authorize"
+    seed = f"{auth_server}/auth/redirect-to?to={_to(target)}"
+    report = await _scan_seed(seed, settings=INTERNAL)
+
+    assert set(report.service_map) == {_key(seed)}
+    assert report.service_map[_key(seed)].url_map[seed].location == target
+
+
+@pytest.mark.parametrize("host, internal", [
+    ("corp.test", True), ("api.corp.test", True), ("api.corp.test.", True),
+    ("intranet", True), ("intranet.", True),
+    ("notcorp.test", False), ("corp.test.evil.example", False), ("www.w3.org", False),
+])
+def test_is_internal(host, internal):
+    """Under an internal domain, with or without the root dot, or single-label."""
+    assert _is_internal(host, ("corp.test",)) is internal

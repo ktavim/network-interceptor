@@ -1,7 +1,8 @@
 """The scan pipeline: crawl -> quarantine -> resolve -> probe -> report, with
 the resolve/probe step repeated, a bounded number of hops, for the cross-origin
 redirect targets each round of probing discloses. Hosts that resolve only to
-the DNS sinkhole are dropped before probing and never reach the report.
+the DNS sinkhole, or that get NXDOMAIN outside the internal domains, are
+dropped before probing and never reach the report.
 
 Pure orchestration of the async core with no persistence, so it can be run
 and tested without a database. This is what the worker executes per scan."""
@@ -31,22 +32,42 @@ log = logging.getLogger(__name__)
 # for a knob nobody tunes.
 _MAX_REDIRECT_HOPS = 5
 
+# Why _resolve_and_probe dropped a host, and how run_scan logs each reason: the
+# INFO summary of the hosts, then the adjective of each DEBUG line per URL.
+_SINKHOLED = "sinkhole"
+_PUBLIC_NXDOMAIN = "public_nxdomain"
+_DROP_LOG = {
+    _SINKHOLED: ("resolving only to the DNS sinkhole", "sinkholed"),
+    _PUBLIC_NXDOMAIN: ("outside INTERNAL_DOMAINS that got NXDOMAIN", "public"),
+}
+
+
+def _is_internal(host: str, domains: tuple[str, ...]) -> bool:
+    """True if `host` is one of `domains` or under one, or is a single-label
+    name (`intranet`), which only an internal resolver can answer for. A
+    trailing root dot (`db.corp.example.`) is ignored."""
+    host = host.rstrip(".")
+    return "." not in host or any(host == d or host.endswith("." + d) for d in domains)
+
 
 async def _resolve_and_probe(
     urls: list[str], settings: ScanSettings,
-) -> tuple[dict[str, AuthInfo], list[dict], dict[str, list[str]], list[ConfigSource], list[str]]:
+) -> tuple[dict[str, AuthInfo], list[dict], dict[str, list[str]], list[ConfigSource], dict[str, str]]:
     """Resolve and probe `urls`, then the cross-origin redirect targets those
     probes disclose, and theirs, up to _MAX_REDIRECT_HOPS rounds.
 
-    Returns (auth_map, unresolved, ip_map, probe_sources, sinkholed): the probe
+    Returns (auth_map, unresolved, ip_map, probe_sources, dropped): the probe
     map over every URL of every hop, the DNS failures and successes across all
-    hops, the ConfigSources the probes disclosed, and the hosts that resolved
-    only to `settings.dns_sinkhole_ips`. A sinkholed host is in neither
-    `unresolved` nor `ip_map` and is never probed; on an air-gapped network
-    whose DNS answers public names with a placeholder (and unknown internal
-    names with NXDOMAIN, which stay `unresolved`), such a host is a public one
-    the scanner cannot reach, and the caller drops its URLs with _drop_hosts.
-
+    hops, the ConfigSources the probes disclosed, and the public hosts, each
+    with its reason, sorted by host. A host is public when it resolved only to
+    `settings.dns_sinkhole_ips` (_SINKHOLED), or when `settings.internal_domains`
+    is set and the host got NXDOMAIN outside them (_PUBLIC_NXDOMAIN). On an
+    air-gapped network the DNS answers some public names with a placeholder and
+    others, like unknown internal names, with NXDOMAIN, so NXDOMAIN alone cannot
+    tell the two apart; the domain suffix does. A dropped host is in neither
+    `unresolved` nor `ip_map` and is never probed, being one the scanner cannot
+    reach, and the caller drops its URLs with _drop_hosts. An NXDOMAIN host
+    under an internal domain, or any with no domains set, stays `unresolved`.
     The disclosed ConfigSources are one per path whose undisclosed
     400/401/403 set off a kept host-root probe (origin `synthesized: <path>`)
     naming that root, and one per redirecting probe (origin `redirect: <url>`)
@@ -73,7 +94,7 @@ async def _resolve_and_probe(
     sinkhole = set(settings.dns_sinkhole_ips)
     unresolved: list[dict] = []
     ip_map: dict[str, list[str]] = {}
-    sinkholed: set[str] = set()
+    dropped: dict[str, str] = {}
     path_probes: list[ProbeResult] = []
     root_probes: list[ProbeResult] = []
     found_sources: list[ConfigSource] = []
@@ -90,31 +111,38 @@ async def _resolve_and_probe(
         unresolved_set = {entry["host"] for entry in unresolved}
         hosts = sorted({urlparse(u).hostname for u in frontier if urlparse(u).hostname})
         new_hosts = [h for h in hosts
-                     if h not in ip_map and h not in unresolved_set and h not in sinkholed]
+                     if h not in ip_map and h not in unresolved_set and h not in dropped]
         if new_hosts:
             log.info("Resolving %d host(s)", len(new_hosts))
             failures, resolved = await resolve_hosts(
                 new_hosts, timeout=settings.dns_timeout_s,
                 max_concurrent=settings.dns_concurrency,
             )
-            unresolved.extend(failures)
-            unresolved_set.update(entry["host"] for entry in failures)
+            for entry in failures:
+                # Only NXDOMAIN: a SERVFAIL or timeout says nothing about
+                # whether the name exists, so the host stays a finding.
+                if (settings.internal_domains and entry["error"] == "NXDOMAIN"
+                        and not _is_internal(entry["host"], settings.internal_domains)):
+                    dropped[entry["host"]] = _PUBLIC_NXDOMAIN
+                else:
+                    unresolved.append(entry)
+                    unresolved_set.add(entry["host"])
             for host, ips in resolved.items():
                 # Only when every address is the placeholder: a host that also
                 # has a real address has a real record.
                 if ips and sinkhole.issuperset(ips):
-                    sinkholed.add(host)
+                    dropped[host] = _SINKHOLED
                 else:
                     ip_map[host] = ips
 
         paths: list[ProbeResult] = []
         roots: list[ProbeResult] = []
-        skip_hosts = unresolved_set | sinkholed
+        skip_hosts = unresolved_set | dropped.keys()
         probeable = [u for u in frontier if urlparse(u).hostname not in skip_hosts]
         if probeable:
             skipped = len(frontier) - len(probeable)
             log.info("Probing %d URL(s) for authentication methods%s", len(probeable),
-                     f" (skipping {skipped} on unresolved or sinkholed hosts)" if skipped else "")
+                     f" (skipping {skipped} on unresolved or dropped hosts)" if skipped else "")
             paths, roots = await probe_urls_with_roots(
                 probeable,
                 timeout=settings.probe_timeout_s,
@@ -133,8 +161,8 @@ async def _resolve_and_probe(
         if next_frontier and hop == _MAX_REDIRECT_HOPS:
             log.warning("Redirect chain exceeded %d hop(s); %d target(s) not followed",
                         _MAX_REDIRECT_HOPS, len(next_frontier))
-            dropped = set(next_frontier)
-            hop_sources = [s for s in hop_sources if s.urls_found[0] not in dropped]
+            unfollowed = set(next_frontier)
+            hop_sources = [s for s in hop_sources if s.urls_found[0] not in unfollowed]
             next_frontier = []
         # A hop's roots were probed already, so they name no frontier. Their
         # sources go first: the path probes that set them off came before any
@@ -147,7 +175,7 @@ async def _resolve_and_probe(
     # resolve_hosts sorts per call; the report promises one order across hops.
     unresolved.sort(key=lambda entry: entry["host"])
     return (build_auth_map(path_probes, root_probes), unresolved, ip_map, found_sources,
-            sorted(sinkholed))
+            dict(sorted(dropped.items())))
 
 
 def _drop_hosts(
@@ -195,14 +223,18 @@ async def run_scan(seeds: list[str], settings: ScanSettings) -> ScanReport:
     all_urls = [u for src in sources for u in src.urls_found]
     unique_urls = [u for u in dict.fromkeys(all_urls) if _classify_url(u) is None]
 
-    auth_map, unresolved, ip_map, probe_srcs, sinkholed = await _resolve_and_probe(
+    auth_map, unresolved, ip_map, probe_srcs, dropped_hosts = await _resolve_and_probe(
         unique_urls, settings)
-    kept, dropped = _drop_hosts(sources + probe_srcs, sinkholed)
-    if dropped:
-        log.info("Dropped %d URL(s) on %d host(s) resolving only to the DNS sinkhole: %s",
-                 len(dropped), len(sinkholed), ", ".join(sinkholed))
-        for url, origins in sorted(dropped.items()):
-            log.debug("Dropped sinkholed URL %s; found in %s", url, ", ".join(origins))
+    kept, dropped = _drop_hosts(sources + probe_srcs, list(dropped_hosts))
+    for reason, (summary, adjective) in _DROP_LOG.items():
+        hosts = [h for h, r in dropped_hosts.items() if r == reason]
+        urls = sorted(u for u in dropped if urlparse(u).hostname in hosts)
+        if not urls:
+            continue
+        log.info("Dropped %d URL(s) on %d host(s) %s: %s",
+                 len(urls), len(hosts), summary, ", ".join(hosts))
+        for url in urls:
+            log.debug("Dropped %s URL %s; found in %s", adjective, url, ", ".join(dropped[url]))
     report = build_report(kept, auth_map, unresolved, ip_map)
     for s in report.suspect_urls:
         log.warning("Not probing suspect URL %s (%s); found in %s",

@@ -1522,3 +1522,41 @@ async def test_probe_filtering_skips_unresolved_hosts(test_server):
     assert bad_url not in auth_map
     assert auth_map[good_url].probe_result is not None
     assert auth_map[good_url].probe_result.status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# Namespace URIs
+# ---------------------------------------------------------------------------
+
+_NAMESPACES = [
+    "http://www.w3.org/2000/svg",
+    "http://www.w3.org/1999/xhtml",
+    "http://www.w3.org/1999/xlink",
+    "http://www.w3.org/1998/Math/MathML",
+    "http://www.w3.org/XML/1998/namespace",
+    "http://www.w3.org/2000/xmlns/",
+    "http://www.w3.org/2001/XMLSchema-instance",
+    "http://www.w3.org/1999/02/22-rdf-syntax-ns#",
+    "http://schemas.xmlsoap.org/soap/envelope/",
+    "http://schemas.openxmlformats.org/spreadsheetml/2006/main",
+    "http://ns.adobe.com/xap/1.0/",
+    "https://json-schema.org/draft/2020-12/schema",
+    "HTTP://WWW.W3.ORG/2000/SVG",
+]
+
+
+def test_namespace_uris_are_not_extracted_from_text():
+    """Rendering code names namespaces as URL strings; nothing is fetched
+    from them, so they are not dependencies. Real URLs beside them, a spec
+    link on the same host and a lookalike host included, still are."""
+    keep = ["https://api.corp.example/v1",
+            "https://www.w3.org/TR/html52/",
+            "https://www.w3.org.corp.example/2000/svg"]
+    text = ";".join(f'n="{u}"' for u in _NAMESPACES + keep)
+    assert extract_urls_from_text(text) == keep
+
+
+def test_namespace_uris_are_not_extracted_from_json():
+    obj = {"$schema": "https://json-schema.org/draft/2020-12/schema",
+           "xmlns": ["http://www.w3.org/2000/svg"], "api": "https://api.corp.example/v1"}
+    assert extract_urls(obj) == ["https://api.corp.example/v1"]

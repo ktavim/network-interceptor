@@ -2,6 +2,7 @@
 
 import ipaddress
 import os
+import re
 from collections.abc import Mapping
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -18,7 +19,22 @@ _ENV_VARS = {
     "dns_timeout_s": "DNS_TIMEOUT_S",
     "dns_concurrency": "DNS_CONCURRENCY",
     "dns_sinkhole_ips": "DNS_SINKHOLE_IPS",
+    "internal_domains": "INTERNAL_DOMAINS",
 }
+
+_DOMAIN_RE = re.compile(r"[a-z0-9_-]+(\.[a-z0-9_-]+)*")
+
+
+def _normalize_domains(values: list[str]) -> list[str]:
+    """Lower-cased, sorted, distinct domain suffixes, with a leading `*.` or `.`
+    and a trailing root `.` dropped: `*.Corp.Example.` is `corp.example`."""
+    out = set()
+    for v in values:
+        d = v.strip().lower().removeprefix("*.").removeprefix(".").removesuffix(".")
+        if not _DOMAIN_RE.fullmatch(d):
+            raise ValueError(f"not a domain name: {v!r}")
+        out.add(d)
+    return sorted(out)
 
 
 class ScanSettings(BaseModel):
@@ -41,6 +57,9 @@ class ScanSettings(BaseModel):
     dns_sinkhole_ips: tuple[str, ...] = Field(
         (), description="Placeholder addresses the DNS answers for public names "
                         "on an air-gapped network; a host resolving only to these is dropped")
+    internal_domains: tuple[str, ...] = Field(
+        (), description="Domain suffixes of the internal network; when set, a host "
+                        "outside them that gets NXDOMAIN is public and is dropped")
 
     @field_validator("dns_sinkhole_ips", mode="before")
     @classmethod
@@ -51,6 +70,15 @@ class ScanSettings(BaseModel):
         if isinstance(v, str):
             v = v.split(",")
         return tuple(sorted({str(ipaddress.ip_address(part.strip())) for part in v if part.strip()}))
+
+    @field_validator("internal_domains", mode="before")
+    @classmethod
+    def _normalize_internal_domains(cls, v):
+        """Comma-separated in the environment (INTERNAL_DOMAINS=corp.example,*.intra.example),
+        normalized by _normalize_domains."""
+        if isinstance(v, str):
+            v = [part for part in v.split(",") if part.strip()]
+        return tuple(_normalize_domains(v))
 
     @classmethod
     def from_env(cls, environ: Mapping[str, str] | None = None) -> "ScanSettings":

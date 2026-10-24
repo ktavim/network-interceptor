@@ -23,11 +23,13 @@ def test_each_field_is_read_from_its_variable():
         "DNS_TIMEOUT_S": "1.5",
         "DNS_CONCURRENCY": "8",
         "DNS_SINKHOLE_IPS": "10.255.255.1",
+        "INTERNAL_DOMAINS": "corp.example",
     })
     assert settings == ScanSettings(
         nav_timeout_ms=10000, wait_after_load_ms=1000, interact_budget_ms=2000,
         follow_links=True, max_pages=7, probe_timeout_s=2.5, probe_concurrency=4,
         dns_timeout_s=1.5, dns_concurrency=8, dns_sinkhole_ips=("10.255.255.1",),
+        internal_domains=("corp.example",),
     )
     # Every field has a variable: none is left that only code can set.
     assert settings.model_dump().keys() == ScanSettings.model_fields.keys()
@@ -80,3 +82,28 @@ def test_scan_settings_snapshot_without_sinkhole_still_loads():
     snapshot = ScanSettings().model_dump(mode="json")
     del snapshot["dns_sinkhole_ips"]
     assert ScanSettings.model_validate(snapshot).dns_sinkhole_ips == ()
+
+
+def test_internal_domains_default_to_none():
+    assert ScanSettings.from_env({}).internal_domains == ()
+    assert ScanSettings.from_env({"INTERNAL_DOMAINS": " "}).internal_domains == ()
+
+
+def test_internal_domains_are_comma_separated_in_the_environment():
+    """Lower-cased, stripped of `*.`, `.` and the root dot, deduplicated, sorted."""
+    settings = ScanSettings.from_env(
+        {"INTERNAL_DOMAINS": " Corp.Example, *.intra.example ,.corp.example.,"})
+    assert settings.internal_domains == ("corp.example", "intra.example")
+
+
+@pytest.mark.parametrize("value", ["https://corp.example", "corp..example", "corp example"])
+def test_internal_domains_reject_a_non_domain(value):
+    with pytest.raises(ValidationError):
+        ScanSettings.from_env({"INTERNAL_DOMAINS": value})
+
+
+def test_scan_settings_snapshot_without_internal_domains_still_loads():
+    """A scan requested before the field existed re-hydrates with no domains."""
+    snapshot = ScanSettings().model_dump(mode="json")
+    del snapshot["internal_domains"]
+    assert ScanSettings.model_validate(snapshot).internal_domains == ()
