@@ -7,8 +7,6 @@ from playwright.async_api import Response
 from .extract import extract_urls_from_text, strip_js_block_comments, urls_from_payload
 from .models import ConfigSource
 
-MAX_PAYLOAD_BYTES = 5 * 1024 * 1024  # 5 MB
-
 log = logging.getLogger(__name__)
 
 
@@ -35,9 +33,9 @@ def _is_js_response(response: Response) -> bool:
     return False
 
 
-def _exceeds_size_limit(response: Response) -> bool:
+def _exceeds_size_limit(response: Response, max_bytes: int) -> bool:
     cl = response.headers.get("content-length", "")
-    if cl.isdigit() and int(cl) > MAX_PAYLOAD_BYTES:
+    if cl.isdigit() and int(cl) > max_bytes:
         return True
     return False
 
@@ -47,13 +45,15 @@ async def capture_response(
     captured_json: list[tuple[str, str]],
     captured_js: list[tuple[str, str]],
     seen_urls: set[str],
+    max_bytes: int,
 ) -> None:
     if response.status < 200 or response.status >= 300:
         return
     if response.url in seen_urls:
         return
-    if _exceeds_size_limit(response):
-        log.warning("Skipping response, too large: %s", response.url)
+    if _exceeds_size_limit(response, max_bytes):
+        log.warning("Skipping response, too large (content-length %s > %d): %s",
+                    response.headers.get("content-length"), max_bytes, response.url)
         return
     is_json = _is_json_response(response)
     is_js = not is_json and _is_js_response(response)
@@ -61,8 +61,9 @@ async def capture_response(
         return
     try:
         body = await response.text()
-        if len(body) > MAX_PAYLOAD_BYTES:
-            log.warning("Skipping response, body too large: %s", response.url)
+        if len(body) > max_bytes:
+            log.warning("Skipping response, body too large (%d > %d): %s",
+                        len(body), max_bytes, response.url)
             return
         if is_json:
             captured_json.append((response.url, body))

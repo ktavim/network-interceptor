@@ -18,6 +18,7 @@ def test_each_field_is_read_from_its_variable():
         "SCAN_INTERACT_BUDGET_MS": "2000",
         "SCAN_FOLLOW_LINKS": "true",
         "SCAN_MAX_PAGES": "7",
+        "SCAN_MAX_PAYLOAD_BYTES": "1024",
         "PROBE_TIMEOUT_S": "2.5",
         "PROBE_CONCURRENCY": "4",
         "DNS_TIMEOUT_S": "1.5",
@@ -26,7 +27,7 @@ def test_each_field_is_read_from_its_variable():
     })
     assert settings == ScanSettings(
         nav_timeout_ms=10000, wait_after_load_ms=1000, interact_budget_ms=2000,
-        follow_links=True, max_pages=7, probe_timeout_s=2.5, probe_concurrency=4,
+        follow_links=True, max_pages=7, max_payload_bytes=1024, probe_timeout_s=2.5, probe_concurrency=4,
         dns_timeout_s=1.5, dns_concurrency=8, dns_sinkhole_ips=("10.255.255.1",),
     )
     # Every field has a variable: none is left that only code can set.

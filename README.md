@@ -147,6 +147,7 @@ Everything but the crawl config is read from the environment, or from `.env`.
 | `SCAN_INTERACT_BUDGET_MS` | 8000 | Per-page budget for scrolls, hovers and clicks |
 | `SCAN_FOLLOW_LINKS` | false | Discover and crawl same-origin links |
 | `SCAN_MAX_PAGES` | 1 | Cap on pages visited |
+| `SCAN_MAX_PAYLOAD_BYTES` | 15728640 (15 MB) | Captured JSON/JS bodies larger than this are skipped and logged |
 | `PROBE_TIMEOUT_S` | 5 | Per-URL probe timeout |
 | `PROBE_CONCURRENCY` | 10 | Concurrent probes |
 | `DNS_TIMEOUT_S` / `DNS_CONCURRENCY` | 3 / 20 | Resolver timeout and concurrency |

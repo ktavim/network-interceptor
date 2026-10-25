@@ -190,6 +190,7 @@ async def run_scan(seeds: list[str], settings: ScanSettings) -> ScanReport:
         interact_budget_ms=settings.interact_budget_ms,
         follow_links=settings.follow_links,
         max_pages=settings.max_pages,
+        max_payload_bytes=settings.max_payload_bytes,
     )
 
     all_urls = [u for src in sources for u in src.urls_found]

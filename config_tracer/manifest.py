@@ -4,7 +4,6 @@ import logging
 import re
 from urllib.parse import urljoin
 
-from .capture import MAX_PAYLOAD_BYTES
 from .extract import try_parse_json
 
 log = logging.getLogger(__name__)
@@ -63,9 +62,11 @@ async def _probe_manifests(
     captured_js: list[tuple[str, str]],
     captured_json: list[tuple[str, str]],
     seen_urls: set[str],
+    max_bytes: int,
 ) -> int:
     """Try well-known manifest paths; fetch any referenced chunks as text.
-    Returns number of chunks captured."""
+    Bodies over `max_bytes` are skipped and logged. Returns number of chunks
+    captured."""
     chunks_added = 0
 
     for manifest_rel in MANIFEST_PATHS:
@@ -79,7 +80,11 @@ async def _probe_manifests(
             body = await resp.text()
         except Exception:
             continue
-        if not body or len(body) > MAX_PAYLOAD_BYTES:
+        if not body:
+            continue
+        if len(body) > max_bytes:
+            log.warning("Skipping manifest, body too large (%d > %d): %s",
+                        len(body), max_bytes, manifest_url)
             continue
 
         # SPAs typically serve their index.html with 200 for any unknown
@@ -105,7 +110,11 @@ async def _probe_manifests(
                 if cresp.status < 200 or cresp.status >= 300:
                     continue
                 cbody = await cresp.text()
-                if not cbody or len(cbody) > MAX_PAYLOAD_BYTES:
+                if not cbody:
+                    continue
+                if len(cbody) > max_bytes:
+                    log.warning("Skipping chunk, body too large (%d > %d): %s",
+                                len(cbody), max_bytes, chunk_abs)
                     continue
                 captured_js.append((chunk_abs, cbody))
                 seen_urls.add(chunk_abs)

@@ -12,6 +12,7 @@ from .dom import extract_from_dom
 from .interact import _run_interactions
 from .manifest import _probe_manifests
 from .models import ConfigSource
+from .settings import MAX_PAYLOAD_BYTES
 
 log = logging.getLogger(__name__)
 
@@ -88,6 +89,7 @@ async def _crawl_one_page(
     timeout: int,
     wait_after_load: int,
     interact_budget_ms: int,
+    max_payload_bytes: int,
     is_seed: bool = False,
 ) -> tuple[list[ConfigSource], list[str]]:
     """Visit one URL; return (dom_sources, discovered_links)."""
@@ -98,7 +100,7 @@ async def _crawl_one_page(
 
     def _on_response(resp: Response) -> None:
         task = asyncio.ensure_future(
-            capture_response(resp, captured, captured_js, seen_urls)
+            capture_response(resp, captured, captured_js, seen_urls, max_payload_bytes)
         )
         capture_tasks.add(task)
         task.add_done_callback(capture_tasks.discard)
@@ -155,6 +157,7 @@ async def crawl(
     interact_budget_ms: int = 8000,
     follow_links: bool = False,
     max_pages: int = 1,
+    max_payload_bytes: int = MAX_PAYLOAD_BYTES,
 ) -> list[ConfigSource]:
     if isinstance(url, str):
         seeds = [url]
@@ -203,6 +206,7 @@ async def crawl(
                 timeout=timeout,
                 wait_after_load=wait_after_load,
                 interact_budget_ms=interact_budget_ms,
+                max_payload_bytes=max_payload_bytes,
                 is_seed=(pages_visited == 0),
             )
             all_dom_sources.extend(dom_sources)
@@ -211,7 +215,8 @@ async def crawl(
             # Manifest probe — once, after the first page renders, against the seed origin
             if not manifest_probed:
                 manifest_probed = True
-                added = await _probe_manifests(context, seeds[0], captured_js, captured, seen_urls)
+                added = await _probe_manifests(context, seeds[0], captured_js, captured,
+                                               seen_urls, max_payload_bytes)
                 if added:
                     log.info("Manifest probe captured %d chunk(s)", added)
 

@@ -413,19 +413,23 @@ class TestIsJsonResponse:
 class TestExceedsSizeLimit:
     def test_under_limit(self):
         resp = FakeResponse(headers={"content-length": "1000"})
-        assert _exceeds_size_limit(resp) is False
+        assert _exceeds_size_limit(resp, 5000) is False
+
+    def test_at_limit(self):
+        resp = FakeResponse(headers={"content-length": "5000"})
+        assert _exceeds_size_limit(resp, 5000) is False
 
     def test_over_limit(self):
         resp = FakeResponse(headers={"content-length": "10000000"})
-        assert _exceeds_size_limit(resp) is True
+        assert _exceeds_size_limit(resp, 5000) is True
 
     def test_no_header(self):
         resp = FakeResponse(headers={})
-        assert _exceeds_size_limit(resp) is False
+        assert _exceeds_size_limit(resp, 5000) is False
 
     def test_non_numeric(self):
         resp = FakeResponse(headers={"content-length": "unknown"})
-        assert _exceeds_size_limit(resp) is False
+        assert _exceeds_size_limit(resp, 5000) is False
 
 
 # ===========================================================================
@@ -450,6 +454,20 @@ async def test_full_crawl_finds_network_and_dom_sources(test_server):
 
     # Network capture: /api/settings.json fetched by inline script
     assert "https://network.example.com/dashboard" in all_urls
+
+
+@pytest.mark.asyncio
+async def test_crawl_skips_bodies_over_payload_limit(test_server, caplog):
+    """A body over max_payload_bytes is dropped with a warning, not captured."""
+    with caplog.at_level(logging.WARNING, logger="config_tracer.capture"):
+        sources = await crawl(test_server, timeout=10000, wait_after_load=2000,
+                              max_payload_bytes=10)
+
+    assert not any(src.origin.startswith(("network:", "js:")) for src in sources)
+    assert any("/api/settings.json" in r.getMessage() and "too large" in r.getMessage()
+               for r in caplog.records)
+    # DOM extraction doesn't go through the limit.
+    assert any("https://strategy-a.example.com/api" in src.urls_found for src in sources)
 
 
 @pytest.mark.asyncio
