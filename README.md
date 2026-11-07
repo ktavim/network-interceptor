@@ -175,4 +175,5 @@ worker/         __main__.py picks the scanner from WORKER_SCANNER; job.py has on
 alembic/        migrations, driven by DATABASE_URL
 scripts/e2e.py  end-to-end smoke test
 tests/          unit/, tracer/, integration/
+docs/           design notes; exposure-design.md plans publishing submitted apps through the F5
 ```
