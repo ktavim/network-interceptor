@@ -18,20 +18,23 @@ Three parts:
 Management network                F5 BIG-IP                  Internal network
 ------------------                ---------                  ----------------
 admin browser     --HTTPS-->  VIP exposure-frontend  -->  exposure console (static files)
+admin browser     --HTTPS-->  VIP keycloak           -->  Keycloak
 admin browser     --HTTPS-->  VIP exposure-api       -->  backend API --- PostgreSQL
-deployment agent  --mTLS--->  VIP exposure-api       -->  backend API
+deployment agent  --HTTPS-->  VIP keycloak           -->  Keycloak
+deployment agent  --HTTPS-->  VIP exposure-api       -->  backend API
+                                                          backend API --> Keycloak (signing keys)
 
 deployment agent  -->  F5 management interface (AS3)
 deployment agent  -->  IP reservation ("DHCP") service
 deployment agent  -->  DNS service
 ```
 
-Every arrow points from the side that opens the connection. The internal network cannot reach the management network, and nothing here needs it to: the agent polls the backend for work and reports back on the same connection. The admin's browser talks only to the backend, never to the agent.
+Every arrow points from the side that opens the connection. The internal network cannot reach the management network, and nothing here needs it to: the agent polls the backend for work and reports back on the same connection. The admin's browser talks only to Keycloak and the backend, never to the agent.
 
 | Secret | Held by |
 |---|---|
 | F5 credentials, IP-reservation and DNS write credentials | The agent only |
-| The agent's mTLS client certificate | The agent; the backend trusts its CA |
+| The agent's Keycloak signing key | The agent only; Keycloak holds its public half |
 | Database credentials | The backend only, as today |
 
 ## Scope of an exposure
@@ -88,7 +91,7 @@ A failure stops at that step. Retry resumes from it; cancel undoes the completed
 
 ## Backend and agent protocol
 
-The agent pulls; the backend never calls it. All agent endpoints are under their own prefix, accept only the agent's client certificate, and are never served to browsers.
+The agent pulls; the backend never calls it. All agent endpoints are under their own prefix and accept only tokens issued to the agent (see Identity).
 
 | Method | Path | Does |
 |---|---|---|
@@ -111,17 +114,36 @@ The backend turns the agent's events into the exposure's event stream, which the
 
 The agent enforces its own limits, whatever the backend sends:
 
-- It writes only to its own partitions, and never to the one holding the exposure console's and backend's VIPs.
+- It writes only to its own partitions, and never to the ones holding the VIPs of the exposure console, the backend and Keycloak.
 - VIP addresses come only from the configured ranges, DNS records only in the configured zones.
 - Declarations are rendered from the agent's own template; the backend sends data, never AS3.
 
 ## Identity
 
-Admins sign in through the identity provider; the backend checks membership of the F5 admin group on every exposure write. The agent is identified by its client certificate. `/me` and `submitted_by` are stubs today; the exposure endpoints must not reach production until real authentication replaces them.
+Both callers authenticate against the org's Keycloak, through its VIP, and the backend validates both kinds of token the same way.
+
+| | Admin | Agent |
+|---|---|---|
+| Keycloak client | `exposure-console`, public, authorization code with PKCE | `exposure-agent`, confidential, service account enabled, standard flow off |
+| Proves itself to Keycloak by | Signing in | Signed JWT: a private key on the agent host; Keycloak has the public key |
+| Token carries | Client role `admin` of `exposure-api` | Client role `agent` of `exposure-api` |
+| May call | The exposure endpoints | `/api/agent/*` only |
+
+`exposure-api` is a bearer-only client that stands for the backend. Both clients get an audience mapper adding `exposure-api` to `aud`, which Keycloak leaves out by default. The F5 admin AD group is mapped to the `admin` role in Keycloak, so the backend checks a role rather than a group name; the `agent` role is assigned to the agent's service account only.
+
+The backend checks, on every request, the token's signature against the realm's signing keys, which it fetches from Keycloak directly over the internal network; its issuer; that `aud` holds `exposure-api`; its expiry; and the role the endpoint requires. An agent token cannot confirm a deploy, and an admin token cannot report one.
+
+Keycloak builds `iss` from the hostname it is reached by, so its hostname is fixed to the VIP's name (`KC_HOSTNAME`). Without that, tokens fetched through the VIP and the keys fetched directly would name different issuers.
+
+The agent keeps its token until shortly before it expires and then requests a new one; client credentials get no refresh token. While Keycloak is down the agent stops claiming and reporting once its token expires, and its step log lets it resume afterwards; admins cannot sign in then either.
+
+`/me` and `submitted_by` are stubs today; the exposure endpoints must not reach production until this replaces them.
 
 ## Break-glass
 
-The console and the backend API are published through the F5 they configure. Their VIPs sit in a partition the agent is not allowed to write, and admins keep direct access to the F5 management GUI and CLI, so a bad deploy cannot take away the tool needed to fix it.
+The console, the backend API and Keycloak are all published through the F5 the agent configures. Their VIPs sit in partitions the agent is not allowed to write, and admins keep direct access to the F5 management GUI and CLI, so a bad deploy cannot take away the tool needed to fix it.
+
+On the backend VIP, an LTM policy accepts `/api/agent/*` only from the agent host's address.
 
 ## Alternatives rejected
 
@@ -133,6 +155,8 @@ The console and the backend API are published through the F5 they configure. The
 | DNS records created before the deploy | A name could resolve to an IP with nothing behind it, or an existing name be repointed before its VIP is live |
 | Imperative iControl REST calls | Not idempotent and not atomic; AS3 gives dry runs and rollback by re-posting the previous declaration |
 | The agent on the DMZ data plane | A host next to the internet would hold F5 credentials |
+| mTLS between the agent and the backend | The backend VIP terminates TLS, so the backend never sees the client certificate unless the F5 forwards it in a header the backend must trust, or a passthrough VIP is added for the agent; and it needs a CA and rotation for one client. Keycloak already issues, revokes and audits credentials |
+| A client secret for the agent | A shared secret sent on every token request; a signed JWT sends only proof of a key that never leaves the agent host |
 
 ## Open questions
 
@@ -144,8 +168,9 @@ The console and the backend API are published through the F5 they configure. The
 6. **Kerberos services.** They clear, but publishing them needs APM and SSO configuration as well as a virtual server and pool. In scope or not?
 7. **Approval.** Who may confirm a deploy, and whether production needs a second approver.
 8. **The agent's source address.** Whether the backend VIP's source allowlist may include the agent. If not, the fallback is the browser relaying signed plans, with the costs listed above.
-9. **Reachability from the management network.** The identity provider for admin sign-in, and the IP reservation and DNS services for the agent.
+9. **Reachability from the management network.** The IP reservation and DNS services, for the agent. Keycloak is reachable through its VIP.
 10. **The F5 itself.** AS3 version, single device or HA pair, existing partition conventions.
+11. **Keycloak.** Which realm the clients go in, whether the AD groups already reach it through LDAP federation, and whether `KC_HOSTNAME` is already set to the VIP's name.
 
 ## Phases
 
