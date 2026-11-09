@@ -9,7 +9,7 @@ Three parts:
 | Part | Lives | Does |
 |---|---|---|
 | **Exposure console** (new frontend) | Internal network, published through the F5 | The queue, grouping, review and confirm, deploy progress, history |
-| **Backend** (this repo) | Internal network | Owns the exposure records, validation, approval and audit; queues work for the agent |
+| **Backend** (this repo) | Internal network | Owns the exposure records, validation, approval and audit; holds the work waiting for the agent |
 | **Deployment agent** (new service) | Management network | The only holder of F5, IP-reservation and DNS credentials; carries out the plans the backend approved |
 
 ## Topology
@@ -49,28 +49,31 @@ Its services are the scan's services with severity `cleared` that are not exclud
 
 Each service already carries what its VIP needs: `scheme`, `host` and `port` are the listener, and `ips` are the pool members.
 
-Each time the backend queues a plan, it re-reads the published-origins registry. A service whose origin was registered after the scan, for example by another app's exposure, is dropped from scope as published. This is what keeps two apps that call the same backend from getting two VIPs for it.
+Each time a plan is requested, the backend re-reads the published-origins registry. A service whose origin was registered after the scan, for example by another app's exposure, is dropped from scope as published. This is what keeps two apps that call the same backend from getting two VIPs for it.
 
 ## Lifecycle
 
 ```
 grouping --> planning --> awaiting_confirmation --> deploying --> deployed
-   ^                            |
-   +----------------------------+  (admin changes the grouping)
+   ^            |                   |
+   +------------+-------------------+  (admin changes the grouping)
 ```
 
 | Status | Means | Leaves by |
 |---|---|---|
 | `grouping` | The admin is arranging services into VIPs | Requesting a plan |
-| `planning` | The agent is reserving IPs, rendering AS3 and running a dry run | The agent's result |
+| `planning` | Waiting for the agent to reserve IPs, render AS3 and dry-run it | The agent's result, or a change to the grouping (back to `grouping`) |
 | `awaiting_confirmation` | The plan and its dry-run diff are ready for the admin | Confirm, or a change to the grouping (back to `grouping`) |
-| `deploying` | The agent is deploying, verifying and creating DNS records | The agent's result |
+| `deploying` | Waiting for the agent to deploy, verify and create DNS records | The agent's result |
 | `deployed` | Live; origins registered as published | Terminal (decommissioning comes later) |
-| `failed` | A plan or deploy gave up; the agent's step log says where | Retry (resumes) or cancel |
-| `cancelled` | The admin cancelled before deploying; reservations released | Terminal |
-| `superseded` | A newer submission of the app replaced it before deploying | Terminal |
+| `failed` | A plan or deploy gave up; the agent's step log says where | Retry (back to `planning` or `deploying`, resuming), or cancel |
+| `cancelling` | Waiting for the agent to release the exposure's IP reservations and DNS records | The agent's result |
+| `cancelled` | The admin cancelled before deploying; everything released | Terminal |
+| `superseded` | A newer submission of the app replaced it before deploying; everything not carried over released | Terminal |
 
-A new submission while an exposure is open supersedes it. The new exposure starts from the old one's grouping for the origins they share and reuses its IP reservations; reservations it no longer needs are released. A new submission after a deploy needs no special case: the deployed origins are in the registry, so the next scan reads them as `published` and the new exposure covers only what changed.
+Every change to the grouping increments the exposure's version, and every result from the agent names the version it was for, so a plan that finishes after the admin moved on is dropped rather than shown. The grouping is locked from confirmation on. Cancelling an exposure that holds nothing, one still in `grouping` that was never planned, goes straight to `cancelled`.
+
+A new submission while an exposure is open supersedes it. The new exposure starts from the old one's grouping for the origins they share and takes over its IP reservations. The old one passes through `cancelling` to release what the new one did not take, and ends `superseded`. A new submission after a deploy needs no special case: the deployed origins are in the registry, so the next scan reads them as `published` and the new exposure covers only what changed.
 
 ## Grouping
 
@@ -93,22 +96,25 @@ A failure stops at that step. Retry resumes from it; cancel undoes the completed
 
 The agent pulls; the backend never calls it. All agent endpoints are under their own prefix and accept only tokens issued to the agent (see Identity).
 
+There is no job queue. The backend cannot hand work to the agent, so the work waits in the backend until the agent asks for it, but the exposures table already holds it: an exposure in `planning`, `deploying` or `cancelling` is waiting for the agent, and its status says what for.
+
 | Method | Path | Does |
 |---|---|---|
-| `POST` | `/api/agent/operations/claim` | Lease the oldest pending operation. Returns it, or 204 when there is none |
-| `POST` | `/api/agent/operations/{id}/heartbeat` | Extend the lease; a lapsed lease makes the operation claimable again |
-| `POST` | `/api/agent/operations/{id}/events` | Report step progress; each event carries a sequence number, so a repeat is ignored |
-| `POST` | `/api/agent/operations/{id}/result` | Report the outcome; idempotent |
+| `GET` | `/api/agent/pending` | The exposures waiting for the agent, oldest first, each with its status, version and payload |
+| `POST` | `/api/agent/exposures/{id}/events` | Report step progress; each event carries a sequence number, so a repeat is ignored |
+| `POST` | `/api/agent/exposures/{id}/result` | Report the outcome for a version; a result for an older version is ignored, and a repeat is too |
 
-An operation is one of:
-
-| Kind | Payload | Result |
+| Status | Payload | Result |
 |---|---|---|
-| `plan` | Exposure id and version, the app, the VIP groups with each service's origin, auth method and pool member IPs, reservations to reuse | Reserved IPs, DNS names, the AS3 declaration, the dry-run diff, a hash of the plan |
-| `deploy` | The plan's hash | Done, with the F5 and DNS references, or failed at a named step |
-| `release` | Reservations and DNS records to undo | Done |
+| `planning` | The app, the VIP groups with each service's origin, auth method and pool member IPs | Reserved IPs, DNS names, the AS3 declaration, the dry-run diff, a hash of the plan |
+| `deploying` | The hash of the plan the admin confirmed | Done, with the F5 and DNS references, or failed at a named step |
+| `cancelling` | For a superseded exposure, the reservations the new one took over | Done |
 
-The operation id is the idempotency key. The agent keeps its own step log keyed by operation and step, so an agent that restarts mid-operation, or loses its lease and claims the operation again, resumes where it stopped instead of reserving a second IP or creating a second record.
+The agent polls every few seconds and works through the exposures one at a time, which AS3 requires anyway: it refuses a declaration while another is in progress.
+
+The agent keeps its own record of what each exposure holds, its IP reservations and DNS records, and a step log keyed by exposure, version and step. An agent that restarts finds the exposure still `deploying` and resumes from the last step it completed, instead of reserving a second IP or creating a second record. A new plan reuses the reservations the exposure already holds and releases the ones it no longer needs, so a plan dropped for being stale leaks nothing. `cancelling` needs no list of what to undo; the agent already has it.
+
+Exactly one agent may run. Two would both act on the same exposure. If a standby agent is ever needed, the agent API gains a lease and nothing else changes.
 
 The backend turns the agent's events into the exposure's event stream, which the console reads over SSE as the scanner frontend reads a scan's.
 
@@ -135,7 +141,7 @@ The backend checks, on every request, the token's signature against the realm's 
 
 Keycloak builds `iss` from the hostname it is reached by, so its hostname is fixed to the VIP's name (`KC_HOSTNAME`). Without that, tokens fetched through the VIP and the keys fetched directly would name different issuers.
 
-The agent keeps its token until shortly before it expires and then requests a new one; client credentials get no refresh token. While Keycloak is down the agent stops claiming and reporting once its token expires, and its step log lets it resume afterwards; admins cannot sign in then either.
+The agent keeps its token until shortly before it expires and then requests a new one; client credentials get no refresh token. While Keycloak is down the agent stops polling and reporting once its token expires, and its step log lets it resume afterwards; admins cannot sign in then either.
 
 `/me` and `submitted_by` are stubs today; the exposure endpoints must not reach production until this replaces them.
 
@@ -151,6 +157,7 @@ On the backend VIP, an LTM policy accepts `/api/agent/*` only from the agent hos
 |---|---|
 | The browser calls the F5, IP reservation and DNS directly | Credentials in the browser; no retry, undo or audit |
 | A deployer worker in this repo, claiming jobs from PostgreSQL | It would have to run on the management network and reach the internal database, the widest rule there is to open |
+| A job queue for the agent, with claims, leases and heartbeats, as the scanners have | That machinery is for many workers competing for jobs. There is one agent, each exposure needs at most one thing at a time, and its status already says what |
 | The browser relays plans between the backend and the agent | The agent cannot tell what the backend approved, and results are lost when the tab closes mid-deploy |
 | DNS records created before the deploy | A name could resolve to an IP with nothing behind it, or an existing name be repointed before its VIP is live |
 | Imperative iControl REST calls | Not idempotent and not atomic; AS3 gives dry runs and rollback by re-posting the previous declaration |
