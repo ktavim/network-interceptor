@@ -2,7 +2,7 @@
 
 Status: draft. Nothing here is built yet.
 
-A second frontend, for the F5 BIG-IP administrators, that takes each submitted app the rest of the way: it shows the external services the app calls that still need a VIP, lets the admin decide which services share a VIP, reserves the IP addresses, deploys the VIPs to the F5 and creates their DNS records.
+A second frontend, for the F5 BIG-IP administrators, that takes each submitted app the rest of the way: it shows the external services the app calls that still need a VIP, lets the admin decide which services share a VIP, reserves the IP addresses, deploys the VIPs to the F5 and creates their DNS records. Browsers outside the internal network then reach the app and every service it calls through the F5, which rewrites the app's responses to point at the new names. Inside the internal network the app is unchanged.
 
 Three parts:
 
@@ -43,11 +43,13 @@ An exposure is created for every submission, in the same transaction as `POST /s
 
 Its services are the scan's services with severity `cleared` that are not excluded: the F5 can publish them and no one has yet. The console shows the rest read-only for context:
 
-- `published` services are already on the F5 and get no VIP.
+- `published` services are already on the F5 and get no VIP, but the app's rewrite map still needs them (see Rewriting).
 - Excluded services are out of scope.
 - A submitted scan has no unexcluded `blocker` or `review` services; submit refuses them.
 
-Each service already carries what its VIP needs: `scheme`, `host` and `port` are the listener, and `ips` are the pool members.
+Each service already carries what its VIP needs: `scheme` and `port` are the listener, and `ips` are the pool members. Its `host` is only the name the app called it by; the VIP gets a new one (see DNS names).
+
+The exposure also covers the app itself. Outside browsers load it through its own VIP, built from the app's `url`, which is optional on an app today and must be set before its exposure can be planned. That VIP is where the rewriting happens. The app's first exposure creates it; later ones update its rewrite map.
 
 Each time a plan is requested, the backend re-reads the published-origins registry. A service whose origin was registered after the scan, for example by another app's exposure, is dropped from scope as published. This is what keeps two apps that call the same backend from getting two VIPs for it.
 
@@ -73,7 +75,7 @@ grouping --> planning --> awaiting_confirmation --> deploying --> deployed
 
 Every change to the grouping increments the exposure's version, and every result from the agent names the version it was for, so a plan that finishes after the admin moved on is dropped rather than shown. The grouping is locked from confirmation on. Cancelling an exposure that holds nothing, one still in `grouping` that was never planned, goes straight to `cancelled`.
 
-A new submission while an exposure is open supersedes it. The new exposure starts from the old one's grouping for the origins they share and takes over its IP reservations. The old one passes through `cancelling` to release what the new one did not take, and ends `superseded`. A new submission after a deploy needs no special case: the deployed origins are in the registry, so the next scan reads them as `published` and the new exposure covers only what changed.
+A new submission while an exposure is open supersedes it. The new exposure starts from the old one's grouping for the origins they share and takes over its IP reservations. The old one passes through `cancelling` to release what the new one did not take, and ends `superseded`. A new submission after a deploy needs no special case: the deployed origins are in the registry, so the next scan reads them as `published`. The new exposure adds VIPs only for what changed, and updates the app's rewrite map to cover every service the app now calls.
 
 ## Grouping
 
@@ -81,14 +83,39 @@ The admin puts each in-scope service into exactly one VIP group. The default pro
 
 The rules depend on what sharing a VIP means (see open questions). If a shared VIP is one IP with a virtual server per port, two services on the same port cannot share it. If it is one virtual server that routes by Host header or SNI, they can, but every service on it must use the same scheme and the VIP's certificate must cover all their names.
 
+## DNS names
+
+Each VIP, the app's included, is published under new names in a zone the agent owns. The original hostnames are never recreated anywhere, so the agent cannot collide with or repoint a name it does not own. The plan shows, for each service, its original origin and the URL that replaces it.
+
+How many names a VIP gets depends on what sharing a VIP means: one per VIP if it is one IP with a virtual server per port, since the port tells its services apart; one per service if it routes by Host header or SNI. The naming convention is open (question 2).
+
+## Rewriting
+
+Inside the internal network nothing changes: users reach the app directly, and it calls its services by their original names. A browser outside reaches the app through its VIP, and the F5 rewrites the app's responses on the way out, replacing each original origin with the URL of the VIP that publishes it, so the browser calls the services through the F5 as well.
+
+The rewrite map covers every service the app calls: the ones this exposure publishes, and the ones already `published`, whose URLs come from the registry. It lives on the app's VIP, so two apps that share a service each carry their own entry for it.
+
+What has to be rewritten:
+
+- Response bodies that name origins: HTML, the app's config files, its JS bundles.
+- Response headers that name them: `Location`, `Content-Security-Policy` (its `connect-src` lists the original origins), cookie domains.
+- CORS: the browser sends the app's new origin in `Origin`. A service that allows only the app's internal origin rejects it, unless the service's VIP rewrites `Origin` on the way in or `Access-Control-Allow-Origin` on the way out.
+
+What it cannot do, which the plan should flag:
+
+- An origin the browser assembles at runtime, rather than one that appears whole in a response, is not rewritten. The interceptor sees such a call and the tracer, reading the configs and bundles, does not, so a service found by the interceptor alone is suspect.
+- Bundles loaded with Subresource Integrity fail their hash once rewritten.
+- A `login_redirect` service sends the browser to an identity provider with a redirect URI naming the internal origin; the provider must accept the new one too.
+- Compressed responses cannot be rewritten as they are: the F5 must strip `Accept-Encoding` toward the app, or decompress first.
+
 ## Order of execution
 
 1. **Plan** (on request, before confirmation): reserve one IP per VIP, render the AS3 declaration, dry-run it against the F5. The admin sees the IPs, the DNS names that will be created, the declaration and the dry-run diff.
 2. **Confirm**: the admin approves that exact plan.
 3. **Deploy**: dry-run again and stop if the diff differs from the approved one (the F5 drifted, or a reservation expired); otherwise post the declaration.
-4. **Verify**: each virtual server is up and its pool members answer.
+4. **Verify**: each virtual server is up and its pool members answer, and the app's VIP serves rewritten responses.
 5. **DNS**: create the records, only now, so no name ever resolves to an IP that nothing is listening on.
-6. **Register**: the backend adds each origin to the published-origins registry, pointing at its VIP.
+6. **Register**: the backend adds each origin to the published-origins registry, with the URL of the VIP that publishes it. The registry gains a column for that URL, which other apps' rewrite maps read. Entries added by hand before this have none, and must be given one before an app that calls them can be exposed.
 
 A failure stops at that step. Retry resumes from it; cancel undoes the completed steps in reverse.
 
@@ -106,7 +133,7 @@ There is no job queue. The backend cannot hand work to the agent, so the work wa
 
 | Status | Payload | Result |
 |---|---|---|
-| `planning` | The app, the VIP groups with each service's origin, auth method and pool member IPs | Reserved IPs, DNS names, the AS3 declaration, the dry-run diff, a hash of the plan |
+| `planning` | The app and its `url`, the VIP groups with each service's origin, auth method and pool member IPs, and the registry URLs of the `published` services it calls | Reserved IPs, DNS names, the AS3 declaration, the dry-run diff, a hash of the plan |
 | `deploying` | The hash of the plan the admin confirmed | Done, with the F5 and DNS references, or failed at a named step |
 | `cancelling` | For a superseded exposure, the reservations the new one took over | Done |
 
@@ -160,6 +187,7 @@ On the backend VIP, an LTM policy accepts `/api/agent/*` only from the agent hos
 | A job queue for the agent, with claims, leases and heartbeats, as the scanners have | That machinery is for many workers competing for jobs. There is one agent, each exposure needs at most one thing at a time, and its status already says what |
 | The browser relays plans between the backend and the agent | The agent cannot tell what the backend approved, and results are lost when the tab closes mid-deploy |
 | DNS records created before the deploy | A name could resolve to an IP with nothing behind it, or an existing name be repointed before its VIP is live |
+| The original hostnames recreated in the outside network's zone, so nothing needs rewriting | The agent would write names that mirror internal ones and can collide with records already in that zone, and every VIP would need a certificate for an internal name |
 | Imperative iControl REST calls | Not idempotent and not atomic; AS3 gives dry runs and rollback by re-posting the previous declaration |
 | The agent on the DMZ data plane | A host next to the internet would hold F5 credentials |
 | mTLS between the agent and the backend | The backend VIP terminates TLS, so the backend never sees the client certificate unless the F5 forwards it in a header the backend must trust, or a passthrough VIP is added for the agent; and it needs a CA and rotation for one client. Keycloak already issues, revokes and audits credentials |
@@ -168,10 +196,10 @@ On the backend VIP, an LTM policy accepts `/api/agent/*` only from the agent hos
 ## Open questions
 
 1. **What does sharing a VIP mean?** One IP with a virtual server per port, or one virtual server routing by Host header or SNI to separate pools. Decides the grouping rules and the AS3 template.
-2. **DNS names.** The original internal hostnames republished in an external zone, or new names, which means reconfiguring the app.
-3. **TLS certificates.** Who issues the certificate for each VIP, and how it reaches the agent.
+2. **DNS naming convention.** Which zone the new names go in, and how a name is formed: from the original host, the app, or the VIP group.
+3. **TLS certificates.** Who issues the certificate for each VIP's new names, and how it reaches the agent.
 4. **The IP reservation service.** Its API: reserve and release, idempotency, whether a reservation expires.
-5. **The app's own URL.** Does it need a VIP too, or only the services it calls?
+5. **How the F5 rewrites.** A rewrite profile in URI-translation mode, or a stream profile with an iRule: which the AS3 version in use supports, and how each handles compressed and chunked bodies and the headers listed under Rewriting.
 6. **Kerberos services.** They clear, but publishing them needs APM and SSO configuration as well as a virtual server and pool. In scope or not?
 7. **Approval.** Who may confirm a deploy, and whether production needs a second approver.
 8. **The agent's source address.** Whether the backend VIP's source allowlist may include the agent. If not, the fallback is the browser relaying signed plans, with the costs listed above.
@@ -184,6 +212,6 @@ On the backend VIP, an LTM policy accepts `/api/agent/*` only from the agent hos
 1. **Discovery**: answers to the open questions; API specs for the IP reservation and DNS services.
 2. **Read-only**: exposures created on submit, the queue and detail endpoints, the console's queue and workspace against mocked data.
 3. **Grouping**: saving and validating groups in the backend, the grouping UI.
-4. **Planning**: the agent protocol, the agent with fake adapters, IP reservation, AS3 rendering and dry run, the confirm screen.
+4. **Planning**: the agent protocol, the agent with fake adapters, IP reservation, AS3 rendering with the app's rewrite map and dry run, the confirm screen.
 5. **Deploy**: deploy, verify, DNS, registry, retry and undo, live progress; end to end against a lab BIG-IP VE.
 6. **Hardening**: real authentication and roles, the audit view, decommissioning a VIP.
