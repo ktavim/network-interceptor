@@ -37,6 +37,7 @@ Every arrow points from the side that opens the connection. The internal network
 | F5 credentials, IP-reservation, DNS and certificate-service write credentials | The agent only |
 | The agent's Keycloak signing key | The agent only; Keycloak holds its public half |
 | Database credentials | The backend only, as today |
+| Each VIP's certificate private key | The certificate service, which generates it; the agent, which installs it; the F5 |
 
 ## Scope of an exposure
 
@@ -70,7 +71,7 @@ grouping --> planning --> awaiting_confirmation --> deploying --> deployed
 | `deploying` | Waiting for the agent to deploy, verify and create DNS records | The agent's result |
 | `deployed` | Live; origins registered as published | Terminal (decommissioning comes later) |
 | `failed` | A plan or deploy gave up; the agent's step log says where | Retry (back to `planning` or `deploying`, resuming), or cancel |
-| `cancelling` | Waiting for the agent to release the exposure's IP reservations and DNS records | The agent's result |
+| `cancelling` | Waiting for the agent to release the exposure's IP reservations, certificates and DNS records | The agent's result |
 | `cancelled` | The admin cancelled before deploying; everything released | Terminal |
 | `superseded` | A newer submission of the app replaced it before deploying; everything not carried over released | Terminal |
 
@@ -84,7 +85,7 @@ A VIP is one IP address and one virtual server, serving HTTPS on port 443. An LT
 
 Every VIP is HTTPS because the app's VIP is: a browser on an HTTPS page blocks its calls to `http://` URLs as mixed content, before they leave the browser. A service VIP on HTTP would deploy and verify cleanly, and the app would still never reach it from outside.
 
-The Host header is inside the encryption, so the virtual server terminates TLS, with a certificate covering the names of every service on it. The DNS team's certificate service issues it: the agent sends it the VIP's names and gets the certificate back (open question 2). The F5 has to decrypt anyway, to rewrite the app's responses on its VIP and the CORS headers on the services'.
+The Host header is inside the encryption, so the virtual server terminates TLS, with a certificate covering the names of every service on it. The DNS team's certificate service issues it: the agent sends it the VIP's names and gets back the certificate and its private key, which the service generates (open question 2). The agent installs both on the F5 itself, and the declaration refers to them by name. The key is never in the declaration, which the backend stores and the console shows, so it never reaches the backend, the database or a browser. The F5 has to decrypt anyway, to rewrite the app's responses on its VIP and the CORS headers on the services'.
 
 The admin puts each in-scope service into exactly one VIP group. The default proposal is one VIP per host. Since every VIP serves the same scheme on the same port, any services may share one. The backend validates every save, that each in-scope service is in exactly one group; the console only displays the errors.
 
@@ -116,7 +117,7 @@ What it cannot do, which the plan should flag:
 
 ## Order of execution
 
-1. **Plan** (on request, before confirmation): reserve one IP per VIP, request each VIP's certificate from the certificate service for the names it will serve, render the AS3 declaration with them, dry-run it against the F5. The admin sees the IPs, the DNS names that will be created, the certificates, the declaration and the dry-run diff. The certificate is requested here rather than at deploy so that the declaration the admin approves is the one deployed.
+1. **Plan** (on request, before confirmation): reserve one IP per VIP, request each VIP's certificate and key from the certificate service for the names it will serve, install them on the F5, render the AS3 declaration referring to them by name, dry-run it against the F5. Installing a certificate changes no traffic; like a reservation, it is held until the exposure deploys or releases it. The admin sees the IPs, the DNS names that will be created, the certificates, the declaration and the dry-run diff. The certificate is requested here rather than at deploy so that the declaration the admin approves is the one deployed.
 2. **Confirm**: the admin approves that exact plan.
 3. **Deploy**: dry-run again and stop if the diff differs from the approved one (the F5 drifted, or a reservation expired); otherwise post the declaration.
 4. **Verify**: each virtual server is up and its pool members answer, and the app's VIP serves rewritten responses.
@@ -143,9 +144,11 @@ There is no job queue. The backend cannot hand work to the agent, so the work wa
 | `deploying` | The hash of the plan the admin confirmed | Done, with the F5 and DNS references, or failed at a named step |
 | `cancelling` | For a superseded exposure, the reservations the new one took over | Done |
 
+Neither a payload nor a result ever carries a private key.
+
 The agent polls every few seconds and works through the exposures one at a time, which AS3 requires anyway: it refuses a declaration while another is in progress.
 
-The agent keeps its own record of what each exposure holds, its IP reservations, certificates and DNS records, and a step log keyed by exposure, version and step. An agent that restarts finds the exposure still `deploying` and resumes from the last step it completed, instead of reserving a second IP or creating a second record. A new plan reuses the reservations the exposure already holds and releases the ones it no longer needs, so a plan dropped for being stale leaks nothing. Likewise it reuses a VIP's certificate while the VIP's names are unchanged, and requests a new one only when they change. `cancelling` needs no list of what to undo; the agent already has it.
+The agent keeps its own record of what each exposure holds, its IP reservations, certificates and DNS records, and a step log keyed by exposure, version and step. An agent that restarts finds the exposure still `deploying` and resumes from the last step it completed, instead of reserving a second IP or creating a second record. A new plan reuses the reservations the exposure already holds and releases the ones it no longer needs, so a plan dropped for being stale leaks nothing. Likewise it reuses a VIP's certificate while the VIP's names are unchanged, and requests a new one only when they change, removing the old one from the F5. `cancelling` needs no list of what to undo; the agent already has it.
 
 Exactly one agent may run. Two would both act on the same exposure. If a standby agent is ever needed, the agent API gains a lease and nothing else changes.
 
@@ -200,19 +203,20 @@ On the backend VIP, an LTM policy accepts `/api/agent/*` only from the agent hos
 | Imperative iControl REST calls | Not idempotent and not atomic; AS3 gives dry runs and rollback by re-posting the previous declaration |
 | The agent on the DMZ data plane | A host next to the internet would hold F5 credentials |
 | mTLS between the agent and the backend | The backend VIP terminates TLS, so the backend never sees the client certificate unless the F5 forwards it in a header the backend must trust, or a passthrough VIP is added for the agent; and it needs a CA and rotation for one client. Keycloak already issues, revokes and audits credentials |
+| A certificate's private key inline in the AS3 declaration | The declaration goes to the backend and the console, so the key would sit in the database and reach the admin's browser |
 | A client secret for the agent | A shared secret sent on every token request; a signed JWT sends only proof of a key that never leaves the agent host |
 
 ## Open questions
 
 1. **DNS naming convention.** Which zone the new names go in, and how a service's name is formed: from its original host, the app, or the VIP group.
-2. **The certificate service.** The DNS team's service issues each VIP's certificate; the agent calls it with the names. Still to learn: its API (whether it takes a CSR or generates the key itself), how long issuing takes, whether a certificate can be revoked when a plan is dropped or cancelled, and who renews certificates before they expire.
+2. **The certificate service.** The DNS team's service issues each VIP's certificate and generates its key; the agent calls it with the names. Still to learn: its API, how it delivers the key and protects it in transit, how long issuing takes, whether a certificate can be revoked when a plan is dropped or cancelled, and who renews certificates before they expire.
 3. **The IP reservation service.** Its API: reserve and release, idempotency, whether a reservation expires.
 4. **How the F5 rewrites.** A rewrite profile in URI-translation mode, or a stream profile with an iRule: which the AS3 version in use supports, and how each handles compressed and chunked bodies and the headers listed under Rewriting.
 5. **Kerberos services.** They clear, but publishing them needs APM and SSO configuration as well as a virtual server and pool. In scope or not?
 6. **Approval.** Who may confirm a deploy, and whether production needs a second approver.
 7. **The agent's source address.** Whether the backend VIP's source allowlist may include the agent. If not, the fallback is the browser relaying signed plans, with the costs listed above.
 8. **Reachability from the management network.** The IP reservation, DNS and certificate services, for the agent. Keycloak is reachable through its VIP.
-9. **The F5 itself.** AS3 version, single device or HA pair, existing partition conventions.
+9. **The F5 itself.** AS3 version, single device or HA pair, existing partition conventions, and where the agent may install certificates and keys, given that it writes only to its own partitions.
 10. **Keycloak.** Which realm the clients go in, whether the AD groups already reach it through LDAP federation, and whether `KC_HOSTNAME` is already set to the VIP's name.
 
 ## Phases
