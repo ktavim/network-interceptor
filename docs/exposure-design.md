@@ -47,9 +47,9 @@ Its services are the scan's services with severity `cleared` that are not exclud
 - Excluded services are out of scope.
 - A submitted scan has no unexcluded `blocker` or `review` services; submit refuses them.
 
-Each service already carries what its VIP needs: `scheme` picks the listener, and `ips` and `port` are the pool members. Its `host` is only the name the app called it by; the VIP gets a new one (see DNS names).
+Each service already carries what its pool needs: `ips` and `port` are the pool members, and `scheme` says whether the F5 speaks HTTP or HTTPS to them. The VIP itself serves HTTPS whatever the scheme (see Grouping). Its `host` is only the name the app called it by; the VIP gets a new one (see DNS names).
 
-The exposure also covers the app itself. Outside browsers load it through its own VIP, built from the app's `url`, which is optional on an app today and must be set before its exposure can be planned. That VIP is where the rewriting happens. The app's first exposure creates it; later ones update its rewrite map.
+The exposure also covers the app itself. Outside browsers load it through its own VIP, built from the app's `url`, which is optional on an app today and must be set before its exposure can be planned. Like every VIP it serves HTTPS, even when the app's `url` is `http://`. That VIP is where the rewriting happens. The app's first exposure creates it; later ones update its rewrite map.
 
 Each time a plan is requested, the backend re-reads the published-origins registry. A service whose origin was registered after the scan, for example by another app's exposure, is dropped from scope as published. This is what keeps two apps that call the same backend from getting two VIPs for it.
 
@@ -79,11 +79,13 @@ A new submission while an exposure is open supersedes it. The new exposure start
 
 ## Grouping
 
-A VIP is one IP address and one virtual server, on the default port of its scheme. An LTM policy on the virtual server matches the Host header and forwards each request to the pool of the service by that name. Services on a VIP share its IP and port but keep their own pools, and a service's original port appears only on its pool members: the rewrite replaces the whole origin, port included.
+A VIP is one IP address and one virtual server, serving HTTPS on port 443. An LTM policy on the virtual server matches the Host header and forwards each request to the pool of the service by that name. Services on a VIP share its IP and port but keep their own pools. A service's original scheme and port appear only on its pool members: the F5 speaks plain HTTP to a member that serves HTTP and re-encrypts toward one that serves HTTPS, and the rewrite replaces the whole origin, scheme and port included.
 
-Over HTTPS the Host header is inside the encryption, so the virtual server terminates TLS, with a certificate covering the names of every service on it (open question 2). The F5 has to decrypt anyway, to rewrite the app's responses on its VIP and the CORS headers on the services'.
+Every VIP is HTTPS because the app's VIP is: a browser on an HTTPS page blocks its calls to `http://` URLs as mixed content, before they leave the browser. A service VIP on HTTP would deploy and verify cleanly, and the app would still never reach it from outside.
 
-The admin puts each in-scope service into exactly one VIP group. The default proposal is one VIP per host and scheme. The backend validates every save; the console only displays the errors. The rule is that every service on a VIP uses the same scheme.
+The Host header is inside the encryption, so the virtual server terminates TLS, with a certificate covering the names of every service on it (open question 2). The F5 has to decrypt anyway, to rewrite the app's responses on its VIP and the CORS headers on the services'.
+
+The admin puts each in-scope service into exactly one VIP group. The default proposal is one VIP per host. Since every VIP serves the same scheme on the same port, any services may share one. The backend validates every save, that each in-scope service is in exactly one group; the console only displays the errors.
 
 ## DNS names
 
@@ -192,7 +194,8 @@ On the backend VIP, an LTM policy accepts `/api/agent/*` only from the agent hos
 | DNS records created before the deploy | A name could resolve to an IP with nothing behind it, or an existing name be repointed before its VIP is live |
 | The original hostnames recreated in the outside network's zone, so nothing needs rewriting | The agent would write names that mirror internal ones and can collide with records already in that zone, and every VIP would need a certificate for an internal name |
 | A VIP as one IP with a virtual server per port | Most services are on 443, so few could share a VIP; the ones that could would need their outside URLs on non-standard ports |
-| A VIP routing by SNI, passing TLS through | The F5 must decrypt anyway to rewrite responses and CORS headers, and HTTP services have no SNI |
+| A VIP routing by SNI, passing TLS through | The F5 must decrypt anyway to rewrite responses and CORS headers, and an HTTP service would have nothing to terminate the TLS |
+| Each VIP on its service's own scheme | The app's VIP serves HTTPS, so the browser blocks every call to an HTTP service's VIP as mixed content |
 | Imperative iControl REST calls | Not idempotent and not atomic; AS3 gives dry runs and rollback by re-posting the previous declaration |
 | The agent on the DMZ data plane | A host next to the internet would hold F5 credentials |
 | mTLS between the agent and the backend | The backend VIP terminates TLS, so the backend never sees the client certificate unless the F5 forwards it in a header the backend must trust, or a passthrough VIP is added for the agent; and it needs a CA and rotation for one client. Keycloak already issues, revokes and audits credentials |
