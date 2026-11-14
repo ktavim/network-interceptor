@@ -92,7 +92,7 @@ The admin puts each in-scope service into exactly one VIP group. The default pro
 
 Each VIP, the app's included, is published under new names in a zone set aside for them, through the DNS team's service, which the agent calls with each name and the IP it resolves to. The same service issues the VIPs' certificates (see Grouping). The original hostnames are never recreated anywhere, so the agent cannot collide with or repoint a name it does not own. The plan shows, for each service, its original origin and the URL that replaces it.
 
-Every service gets its own name, resolving to its VIP's IP, since the name the browser sends in the Host header is what tells a VIP's services apart. The app's VIP has one name. The naming convention is open (question 1).
+Every service gets its own name, formed from its original host and resolving to its VIP's IP, since the name the browser sends in the Host header is what tells a VIP's services apart. The app's VIP has one name, formed from the host of the app's `url`. A name follows from the host alone, so it stays the same across re-plans and superseding exposures, and a VIP's certificate is reissued only when the set of services on it changes. Two origins that share a host but differ in scheme or port, the app's included, would get the same name; how they are told apart is open (question 1).
 
 ## Rewriting
 
@@ -207,7 +207,7 @@ On the backend VIP, an LTM policy accepts `/api/agent/*` only from the agent hos
 
 ## Open questions
 
-1. **DNS naming convention.** Which zone the new names go in, and how a service's name is formed: from its original host, the app, or the VIP group.
+1. **DNS naming convention.** A name is formed from the service's original host. Still to settle: which zone the new names go in, the exact form of a name given its host, and how two origins on the same host, differing only in scheme or port, get distinct names.
 2. **The DNS service.** The DNS team's service creates the records and issues each VIP's certificate, generating its key; the agent calls it with the details. Still to learn: its API for both, whether creating and deleting a record are idempotent, how it delivers the key and protects it in transit, how long issuing takes, whether a certificate can be revoked when a plan is dropped or cancelled, and who renews certificates before they expire.
 3. **The IP reservation service.** Its API: reserve and release, idempotency, whether a reservation expires.
 4. **How the F5 rewrites.** A rewrite profile in URI-translation mode, or a stream profile with an iRule: which the AS3 version in use supports, and how each handles compressed and chunked bodies and the headers listed under Rewriting.
