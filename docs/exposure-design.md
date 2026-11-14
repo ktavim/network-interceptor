@@ -10,7 +10,7 @@ Three parts:
 |---|---|---|
 | **Exposure console** (new frontend) | Internal network, published through the F5 | The queue, grouping, review and confirm, deploy progress, history |
 | **Backend** (this repo) | Internal network | Owns the exposure records, validation, approval and audit; holds the work waiting for the agent |
-| **Deployment agent** (new service) | Management network | The only holder of F5, IP-reservation, DNS and certificate-service credentials; carries out the plans the backend approved |
+| **Deployment agent** (new service) | Management network | The only holder of F5, IP-reservation and DNS service credentials; carries out the plans the backend approved |
 
 ## Topology
 
@@ -26,18 +26,17 @@ deployment agent  --HTTPS-->  VIP exposure-api       -->  backend API
 
 deployment agent  -->  F5 management interface (AS3)
 deployment agent  -->  IP reservation ("DHCP") service
-deployment agent  -->  DNS service
-deployment agent  -->  certificate service (DNS team)
+deployment agent  -->  DNS service (DNS team): records and certificates
 ```
 
 Every arrow points from the side that opens the connection. The internal network cannot reach the management network, and nothing here needs it to: the agent polls the backend for work and reports back on the same connection. The admin's browser talks only to Keycloak and the backend, never to the agent.
 
 | Secret | Held by |
 |---|---|
-| F5 credentials, IP-reservation, DNS and certificate-service write credentials | The agent only |
+| F5 credentials, IP-reservation and DNS service write credentials | The agent only |
 | The agent's Keycloak signing key | The agent only; Keycloak holds its public half |
 | Database credentials | The backend only, as today |
-| Each VIP's certificate private key | The certificate service, which generates it; the agent, which installs it; the F5 |
+| Each VIP's certificate private key | The DNS service, which generates it; the agent, which installs it; the F5 |
 
 ## Scope of an exposure
 
@@ -85,13 +84,13 @@ A VIP is one IP address and one virtual server, serving HTTPS on port 443. An LT
 
 Every VIP is HTTPS because the app's VIP is: a browser on an HTTPS page blocks its calls to `http://` URLs as mixed content, before they leave the browser. A service VIP on HTTP would deploy and verify cleanly, and the app would still never reach it from outside.
 
-The Host header is inside the encryption, so the virtual server terminates TLS, with a certificate covering the names of every service on it. The DNS team's certificate service issues it: the agent sends it the VIP's names and gets back the certificate and its private key, which the service generates (open question 2). The agent installs both on the F5 itself, and the declaration refers to them by name. The key is never in the declaration, which the backend stores and the console shows, so it never reaches the backend, the database or a browser. The F5 has to decrypt anyway, to rewrite the app's responses on its VIP and the CORS headers on the services'.
+The Host header is inside the encryption, so the virtual server terminates TLS, with a certificate covering the names of every service on it. The DNS service issues it: the agent sends it the VIP's names and gets back the certificate and its private key, which the service generates (open question 2). The agent installs both on the F5 itself, and the declaration refers to them by name. The key is never in the declaration, which the backend stores and the console shows, so it never reaches the backend, the database or a browser. The F5 has to decrypt anyway, to rewrite the app's responses on its VIP and the CORS headers on the services'.
 
 The admin puts each in-scope service into exactly one VIP group. The default proposal is one VIP per host. Since every VIP serves the same scheme on the same port, any services may share one. The backend validates every save, that each in-scope service is in exactly one group; the console only displays the errors.
 
 ## DNS names
 
-Each VIP, the app's included, is published under new names in a zone the agent owns. The original hostnames are never recreated anywhere, so the agent cannot collide with or repoint a name it does not own. The plan shows, for each service, its original origin and the URL that replaces it.
+Each VIP, the app's included, is published under new names in a zone set aside for them, through the DNS team's service, which the agent calls with each name and the IP it resolves to. The same service issues the VIPs' certificates (see Grouping). The original hostnames are never recreated anywhere, so the agent cannot collide with or repoint a name it does not own. The plan shows, for each service, its original origin and the URL that replaces it.
 
 Every service gets its own name, resolving to its VIP's IP, since the name the browser sends in the Host header is what tells a VIP's services apart. The app's VIP has one name. The naming convention is open (question 1).
 
@@ -117,11 +116,11 @@ What it cannot do, which the plan should flag:
 
 ## Order of execution
 
-1. **Plan** (on request, before confirmation): reserve one IP per VIP, request each VIP's certificate and key from the certificate service for the names it will serve, install them on the F5, render the AS3 declaration referring to them by name, dry-run it against the F5. Installing a certificate changes no traffic; like a reservation, it is held until the exposure deploys or releases it. The admin sees the IPs, the DNS names that will be created, the certificates, the declaration and the dry-run diff. The certificate is requested here rather than at deploy so that the declaration the admin approves is the one deployed.
+1. **Plan** (on request, before confirmation): reserve one IP per VIP, request each VIP's certificate and key from the DNS service for the names it will serve, install them on the F5, render the AS3 declaration referring to them by name, dry-run it against the F5. Installing a certificate changes no traffic; like a reservation, it is held until the exposure deploys or releases it. The admin sees the IPs, the DNS names that will be created, the certificates, the declaration and the dry-run diff. The certificate is requested here rather than at deploy so that the declaration the admin approves is the one deployed.
 2. **Confirm**: the admin approves that exact plan.
 3. **Deploy**: dry-run again and stop if the diff differs from the approved one (the F5 drifted, or a reservation expired); otherwise post the declaration.
 4. **Verify**: each virtual server is up and its pool members answer, and the app's VIP serves rewritten responses.
-5. **DNS**: create the records, only now, so no name ever resolves to an IP that nothing is listening on.
+5. **DNS**: call the DNS service to create the records, only now, so no name ever resolves to an IP that nothing is listening on.
 6. **Register**: the backend adds each origin to the published-origins registry, with the URL of the VIP that publishes it. The registry gains a column for that URL, which other apps' rewrite maps read. Entries added by hand before this have none, and must be given one before an app that calls them can be exposed.
 
 A failure stops at that step. Retry resumes from it; cancel undoes the completed steps in reverse.
@@ -209,19 +208,19 @@ On the backend VIP, an LTM policy accepts `/api/agent/*` only from the agent hos
 ## Open questions
 
 1. **DNS naming convention.** Which zone the new names go in, and how a service's name is formed: from its original host, the app, or the VIP group.
-2. **The certificate service.** The DNS team's service issues each VIP's certificate and generates its key; the agent calls it with the names. Still to learn: its API, how it delivers the key and protects it in transit, how long issuing takes, whether a certificate can be revoked when a plan is dropped or cancelled, and who renews certificates before they expire.
+2. **The DNS service.** The DNS team's service creates the records and issues each VIP's certificate, generating its key; the agent calls it with the details. Still to learn: its API for both, whether creating and deleting a record are idempotent, how it delivers the key and protects it in transit, how long issuing takes, whether a certificate can be revoked when a plan is dropped or cancelled, and who renews certificates before they expire.
 3. **The IP reservation service.** Its API: reserve and release, idempotency, whether a reservation expires.
 4. **How the F5 rewrites.** A rewrite profile in URI-translation mode, or a stream profile with an iRule: which the AS3 version in use supports, and how each handles compressed and chunked bodies and the headers listed under Rewriting.
 5. **Kerberos services.** They clear, but publishing them needs APM and SSO configuration as well as a virtual server and pool. In scope or not?
 6. **Approval.** Who may confirm a deploy, and whether production needs a second approver.
 7. **The agent's source address.** Whether the backend VIP's source allowlist may include the agent. If not, the fallback is the browser relaying signed plans, with the costs listed above.
-8. **Reachability from the management network.** The IP reservation, DNS and certificate services, for the agent. Keycloak is reachable through its VIP.
+8. **Reachability from the management network.** The IP reservation and DNS services, for the agent. Keycloak is reachable through its VIP.
 9. **The F5 itself.** AS3 version, single device or HA pair, existing partition conventions, and where the agent may install certificates and keys, given that it writes only to its own partitions.
 10. **Keycloak.** Which realm the clients go in, whether the AD groups already reach it through LDAP federation, and whether `KC_HOSTNAME` is already set to the VIP's name.
 
 ## Phases
 
-1. **Discovery**: answers to the open questions; API specs for the IP reservation, DNS and certificate services.
+1. **Discovery**: answers to the open questions; API specs for the IP reservation and DNS services.
 2. **Read-only**: exposures created on submit, the queue and detail endpoints, the console's queue and workspace against mocked data.
 3. **Grouping**: saving and validating groups in the backend, the grouping UI.
 4. **Planning**: the agent protocol, the agent with fake adapters, IP reservation, certificate requests, AS3 rendering with the app's rewrite map and dry run, the confirm screen.
