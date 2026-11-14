@@ -47,7 +47,7 @@ Its services are the scan's services with severity `cleared` that are not exclud
 - Excluded services are out of scope.
 - A submitted scan has no unexcluded `blocker` or `review` services; submit refuses them.
 
-Each service already carries what its VIP needs: `scheme` and `port` are the listener, and `ips` are the pool members. Its `host` is only the name the app called it by; the VIP gets a new one (see DNS names).
+Each service already carries what its VIP needs: `scheme` picks the listener, and `ips` and `port` are the pool members. Its `host` is only the name the app called it by; the VIP gets a new one (see DNS names).
 
 The exposure also covers the app itself. Outside browsers load it through its own VIP, built from the app's `url`, which is optional on an app today and must be set before its exposure can be planned. That VIP is where the rewriting happens. The app's first exposure creates it; later ones update its rewrite map.
 
@@ -79,15 +79,17 @@ A new submission while an exposure is open supersedes it. The new exposure start
 
 ## Grouping
 
-The admin puts each in-scope service into exactly one VIP group. The default proposal is one VIP per host. The backend validates every save; the console only displays the errors.
+A VIP is one IP address and one virtual server, on the default port of its scheme. An LTM policy on the virtual server matches the Host header and forwards each request to the pool of the service by that name. Services on a VIP share its IP and port but keep their own pools, and a service's original port appears only on its pool members: the rewrite replaces the whole origin, port included.
 
-The rules depend on what sharing a VIP means (see open questions). If a shared VIP is one IP with a virtual server per port, two services on the same port cannot share it. If it is one virtual server that routes by Host header or SNI, they can, but every service on it must use the same scheme and the VIP's certificate must cover all their names.
+Over HTTPS the Host header is inside the encryption, so the virtual server terminates TLS, with a certificate covering the names of every service on it (open question 2). The F5 has to decrypt anyway, to rewrite the app's responses on its VIP and the CORS headers on the services'.
+
+The admin puts each in-scope service into exactly one VIP group. The default proposal is one VIP per host and scheme. The backend validates every save; the console only displays the errors. The rule is that every service on a VIP uses the same scheme.
 
 ## DNS names
 
 Each VIP, the app's included, is published under new names in a zone the agent owns. The original hostnames are never recreated anywhere, so the agent cannot collide with or repoint a name it does not own. The plan shows, for each service, its original origin and the URL that replaces it.
 
-How many names a VIP gets depends on what sharing a VIP means: one per VIP if it is one IP with a virtual server per port, since the port tells its services apart; one per service if it routes by Host header or SNI. The naming convention is open (question 2).
+Every service gets its own name, resolving to its VIP's IP, since the name the browser sends in the Host header is what tells a VIP's services apart. The app's VIP has one name. The naming convention is open (question 1).
 
 ## Rewriting
 
@@ -99,6 +101,7 @@ What has to be rewritten:
 
 - Response bodies that name origins: HTML, the app's config files, its JS bundles.
 - Response headers that name them: `Location`, `Content-Security-Policy` (its `connect-src` lists the original origins), cookie domains.
+- The `Host` header toward a service: the browser sends the service's new name, which the VIP routes by. The VIP sets it back to the original name before forwarding, and uses the original as SNI toward an HTTPS pool member, since the service may serve several names or check which one it was called by.
 - CORS: the browser sends the app's new origin in `Origin`. A service that allows only the app's internal origin rejects it, unless the service's VIP rewrites `Origin` on the way in or `Access-Control-Allow-Origin` on the way out.
 
 What it cannot do, which the plan should flag:
@@ -188,6 +191,8 @@ On the backend VIP, an LTM policy accepts `/api/agent/*` only from the agent hos
 | The browser relays plans between the backend and the agent | The agent cannot tell what the backend approved, and results are lost when the tab closes mid-deploy |
 | DNS records created before the deploy | A name could resolve to an IP with nothing behind it, or an existing name be repointed before its VIP is live |
 | The original hostnames recreated in the outside network's zone, so nothing needs rewriting | The agent would write names that mirror internal ones and can collide with records already in that zone, and every VIP would need a certificate for an internal name |
+| A VIP as one IP with a virtual server per port | Most services are on 443, so few could share a VIP; the ones that could would need their outside URLs on non-standard ports |
+| A VIP routing by SNI, passing TLS through | The F5 must decrypt anyway to rewrite responses and CORS headers, and HTTP services have no SNI |
 | Imperative iControl REST calls | Not idempotent and not atomic; AS3 gives dry runs and rollback by re-posting the previous declaration |
 | The agent on the DMZ data plane | A host next to the internet would hold F5 credentials |
 | mTLS between the agent and the backend | The backend VIP terminates TLS, so the backend never sees the client certificate unless the F5 forwards it in a header the backend must trust, or a passthrough VIP is added for the agent; and it needs a CA and rotation for one client. Keycloak already issues, revokes and audits credentials |
@@ -195,17 +200,16 @@ On the backend VIP, an LTM policy accepts `/api/agent/*` only from the agent hos
 
 ## Open questions
 
-1. **What does sharing a VIP mean?** One IP with a virtual server per port, or one virtual server routing by Host header or SNI to separate pools. Decides the grouping rules and the AS3 template.
-2. **DNS naming convention.** Which zone the new names go in, and how a name is formed: from the original host, the app, or the VIP group.
-3. **TLS certificates.** Who issues the certificate for each VIP's new names, and how it reaches the agent.
-4. **The IP reservation service.** Its API: reserve and release, idempotency, whether a reservation expires.
-5. **How the F5 rewrites.** A rewrite profile in URI-translation mode, or a stream profile with an iRule: which the AS3 version in use supports, and how each handles compressed and chunked bodies and the headers listed under Rewriting.
-6. **Kerberos services.** They clear, but publishing them needs APM and SSO configuration as well as a virtual server and pool. In scope or not?
-7. **Approval.** Who may confirm a deploy, and whether production needs a second approver.
-8. **The agent's source address.** Whether the backend VIP's source allowlist may include the agent. If not, the fallback is the browser relaying signed plans, with the costs listed above.
-9. **Reachability from the management network.** The IP reservation and DNS services, for the agent. Keycloak is reachable through its VIP.
-10. **The F5 itself.** AS3 version, single device or HA pair, existing partition conventions.
-11. **Keycloak.** Which realm the clients go in, whether the AD groups already reach it through LDAP federation, and whether `KC_HOSTNAME` is already set to the VIP's name.
+1. **DNS naming convention.** Which zone the new names go in, and how a service's name is formed: from its original host, the app, or the VIP group.
+2. **TLS certificates.** Who issues the certificate for each VIP, covering the names of all its services, and how it reaches the agent.
+3. **The IP reservation service.** Its API: reserve and release, idempotency, whether a reservation expires.
+4. **How the F5 rewrites.** A rewrite profile in URI-translation mode, or a stream profile with an iRule: which the AS3 version in use supports, and how each handles compressed and chunked bodies and the headers listed under Rewriting.
+5. **Kerberos services.** They clear, but publishing them needs APM and SSO configuration as well as a virtual server and pool. In scope or not?
+6. **Approval.** Who may confirm a deploy, and whether production needs a second approver.
+7. **The agent's source address.** Whether the backend VIP's source allowlist may include the agent. If not, the fallback is the browser relaying signed plans, with the costs listed above.
+8. **Reachability from the management network.** The IP reservation and DNS services, for the agent. Keycloak is reachable through its VIP.
+9. **The F5 itself.** AS3 version, single device or HA pair, existing partition conventions.
+10. **Keycloak.** Which realm the clients go in, whether the AD groups already reach it through LDAP federation, and whether `KC_HOSTNAME` is already set to the VIP's name.
 
 ## Phases
 
