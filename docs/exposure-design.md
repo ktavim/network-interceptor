@@ -48,6 +48,10 @@ Its services are the scan's services with severity `cleared` that are not exclud
 - Excluded services are out of scope.
 - A submitted scan has no unexcluded `blocker` or `review` services; submit refuses them.
 
+Kerberos services are `cleared` but not supported in v1. A browser outside the internal network cannot get a Kerberos ticket for them: it usually cannot reach a domain controller, and the ticket it would ask for names the service's new hostname, which the domain does not know. Publishing them takes APM: the F5 signs the user in another way and obtains the ticket on their behalf through constrained delegation (see Later). Until then, the backend refuses to plan an exposure that has an unexcluded Kerberos service, and the console shows the service flagged as not yet supported. The exposure waits in `grouping` rather than deploying without the service: the app's rewrite map would have no entry for it, so the app would verify cleanly and its calls to that service would still fail from outside. The severity stays `cleared`, since the F5 can publish these services and v2 will.
+
+The same applies to an app that signs its own users in with Kerberos, but the scan records auth methods only for the services an app calls, not for the app itself, so v1 cannot detect it.
+
 Each service already carries what its pool needs: `ips` and `port` are the pool members, and `scheme` says whether the F5 speaks HTTP or HTTPS to them. The VIP itself serves HTTPS whatever the scheme (see Grouping). Its `host` is only the name the app called it by; the VIP gets a new one (see DNS names).
 
 The exposure also covers the app itself. Outside browsers load it through its own VIP, built from the app's `url`, which is optional on an app today and must be set before its exposure can be planned. Like every VIP it serves HTTPS, even when the app's `url` is `http://`. That VIP is where the rewriting happens. The app's first exposure creates it; later ones update its rewrite map.
@@ -199,6 +203,7 @@ On the backend VIP, an LTM policy accepts `/api/agent/*` only from the agent hos
 | A VIP as one IP with a virtual server per port | Most services are on 443, so few could share a VIP; the ones that could would need their outside URLs on non-standard ports |
 | A VIP routing by SNI, passing TLS through | The F5 must decrypt anyway to rewrite responses and CORS headers, and an HTTP service would have nothing to terminate the TLS |
 | Each VIP on its service's own scheme | The app's VIP serves HTTPS, so the browser blocks every call to an HTTP service's VIP as mixed content |
+| Kerberos services marked `review` or `blocker` until v2 | Submit refuses those, so their apps could not be submitted at all; and the F5 can publish them, which v2 needs the severity to keep saying |
 | Imperative iControl REST calls | Not idempotent and not atomic; AS3 gives dry runs and rollback by re-posting the previous declaration |
 | The agent on the DMZ data plane | A host next to the internet would hold F5 credentials |
 | mTLS between the agent and the backend | The backend VIP terminates TLS, so the backend never sees the client certificate unless the F5 forwards it in a header the backend must trust, or a passthrough VIP is added for the agent; and it needs a CA and rotation for one client. Keycloak already issues, revokes and audits credentials |
@@ -211,11 +216,10 @@ On the backend VIP, an LTM policy accepts `/api/agent/*` only from the agent hos
 2. **The DNS service.** The DNS team's service creates the records and issues each VIP's certificate, generating its key; the agent calls it with the details. Still to learn: its API for both, whether creating and deleting a record are idempotent, how it delivers the key and protects it in transit, how long issuing takes, whether a certificate can be revoked when a plan is dropped or cancelled, and who renews certificates before they expire.
 3. **The IP reservation service.** Its API: reserve and release, idempotency, whether a reservation expires.
 4. **How the F5 rewrites.** A rewrite profile in URI-translation mode, or a stream profile with an iRule: which the AS3 version in use supports, and how each handles compressed and chunked bodies and the headers listed under Rewriting.
-5. **Kerberos services.** They clear, but publishing them needs APM and SSO configuration as well as a virtual server and pool. In scope or not?
-6. **The agent's source address.** Whether the backend VIP's source allowlist may include the agent. If not, the fallback is the browser relaying signed plans, with the costs listed above.
-7. **Reachability from the management network.** The IP reservation and DNS services, for the agent. Keycloak is reachable through its VIP.
-8. **The F5 itself.** AS3 version, single device or HA pair, existing partition conventions, and where the agent may install certificates and keys, given that it writes only to its own partitions.
-9. **Keycloak.** Which realm the clients go in, whether the AD groups already reach it through LDAP federation, and whether `KC_HOSTNAME` is already set to the VIP's name.
+5. **The agent's source address.** Whether the backend VIP's source allowlist may include the agent. If not, the fallback is the browser relaying signed plans, with the costs listed above.
+6. **Reachability from the management network.** The IP reservation and DNS services, for the agent. Keycloak is reachable through its VIP.
+7. **The F5 itself.** AS3 version, single device or HA pair, existing partition conventions, and where the agent may install certificates and keys, given that it writes only to its own partitions.
+8. **Keycloak.** Which realm the clients go in, whether the AD groups already reach it through LDAP federation, and whether `KC_HOSTNAME` is already set to the VIP's name.
 
 ## Phases
 
@@ -225,3 +229,7 @@ On the backend VIP, an LTM policy accepts `/api/agent/*` only from the agent hos
 4. **Planning**: the agent protocol, the agent with fake adapters, IP reservation, certificate requests, AS3 rendering with the app's rewrite map and dry run, the confirm screen.
 5. **Deploy**: deploy, verify, DNS, registry, retry and undo, live progress; end to end against a lab BIG-IP VE.
 6. **Hardening**: real authentication and roles, the audit view, decommissioning a VIP.
+
+## Later
+
+- **Kerberos services (v2).** The F5 has an APM licence. Each Kerberos service's VIP gets an access profile that signs the outside user in, and an SSO profile that obtains a ticket for the service's original name through Kerberos constrained delegation. This needs a delegation account in AD, with delegation rights to each service's SPN, which the AD team sets up; planning then checks that it exists for every Kerberos service in the exposure. Still to settle: how outside users sign in, and whether the agent may write APM objects to its partitions. The app's own auth method must be recorded too, so that an app that signs its users in with Kerberos is caught.
