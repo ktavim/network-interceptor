@@ -12,7 +12,7 @@ Decided: the console has its own styling and theme, and does not reuse the scann
 
 To decide:
 
-- Component library, or none.
+- Component library, or none. Carbon is a candidate (see References).
 - Typography, spacing scale and colour tokens.
 
 ## Status presentation
@@ -73,6 +73,22 @@ To decide:
 - Density, given the admins' screens and how many services an exposure can hold.
 - Whether there is a dark mode.
 - Accessibility target, keyboard use of the grouping screen, and status colours that are not the only cue.
+
+## References
+
+Sites whose patterns fit a screen of the console. Take the patterns, not the branding: the console keeps its own look.
+
+| Reference | What to take | Informs |
+|---|---|---|
+| HCP Terraform, a run's page | The flow closest to the console's: plan, review the diff, confirm and apply, follow the apply; the run list and its status badges; a summary of what will be added, changed and destroyed above the detail | Status presentation, Plan review, Progress and failure |
+| GitHub, a pull request's changed files | Unified and split diffs, collapsible files, line numbers | Plan review |
+| Argo CD, an application's diff and sync status | A desired declaration compared with the live state, status per resource; close to an AS3 dry-run | Plan review, Status presentation |
+| Vercel, a deployment's page | Steps that appear as they run, a streaming log, a failed step that stands out | Progress and failure |
+| Linear | Dense lists that still read well, status icons, keyboard navigation | Status presentation (the queue), Density |
+| Cloudflare, the DNS records page | Tables of names, types and targets | Plan review (each VIP's names and IP) |
+| IBM Carbon design system | Data tables, status indicators that do not rely on colour alone, dialogs for dangerous actions, accessibility guidance; a candidate for the component library | Base look, Destructive actions, Density, dark mode, accessibility |
+
+Vercel's Geist and GitHub's Primer are lighter alternatives to Carbon, both with dark modes.
 
 ## Mockups
 
