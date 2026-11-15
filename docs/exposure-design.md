@@ -117,7 +117,7 @@ What it cannot do, which the plan should flag:
 ## Order of execution
 
 1. **Plan** (on request, before confirmation): reserve one IP per VIP, request each VIP's certificate and key from the DNS service for the names it will serve, install them on the F5, render the AS3 declaration referring to them by name, dry-run it against the F5. Installing a certificate changes no traffic; like a reservation, it is held until the exposure deploys or releases it. The admin sees the IPs, the DNS names that will be created, the certificates, the declaration and the dry-run diff. The certificate is requested here rather than at deploy so that the declaration the admin approves is the one deployed.
-2. **Confirm**: the admin approves that exact plan.
+2. **Confirm**: an admin approves that exact plan. Any holder of the `admin` role may confirm, including the one who arranged the grouping and requested the plan, and one approval is enough.
 3. **Deploy**: dry-run again and stop if the diff differs from the approved one (the F5 drifted, or a reservation expired); otherwise post the declaration.
 4. **Verify**: each virtual server is up and its pool members answer, and the app's VIP serves rewritten responses.
 5. **DNS**: call the DNS service to create the records, only now, so no name ever resolves to an IP that nothing is listening on.
@@ -212,11 +212,10 @@ On the backend VIP, an LTM policy accepts `/api/agent/*` only from the agent hos
 3. **The IP reservation service.** Its API: reserve and release, idempotency, whether a reservation expires.
 4. **How the F5 rewrites.** A rewrite profile in URI-translation mode, or a stream profile with an iRule: which the AS3 version in use supports, and how each handles compressed and chunked bodies and the headers listed under Rewriting.
 5. **Kerberos services.** They clear, but publishing them needs APM and SSO configuration as well as a virtual server and pool. In scope or not?
-6. **Approval.** Who may confirm a deploy, and whether production needs a second approver.
-7. **The agent's source address.** Whether the backend VIP's source allowlist may include the agent. If not, the fallback is the browser relaying signed plans, with the costs listed above.
-8. **Reachability from the management network.** The IP reservation and DNS services, for the agent. Keycloak is reachable through its VIP.
-9. **The F5 itself.** AS3 version, single device or HA pair, existing partition conventions, and where the agent may install certificates and keys, given that it writes only to its own partitions.
-10. **Keycloak.** Which realm the clients go in, whether the AD groups already reach it through LDAP federation, and whether `KC_HOSTNAME` is already set to the VIP's name.
+6. **The agent's source address.** Whether the backend VIP's source allowlist may include the agent. If not, the fallback is the browser relaying signed plans, with the costs listed above.
+7. **Reachability from the management network.** The IP reservation and DNS services, for the agent. Keycloak is reachable through its VIP.
+8. **The F5 itself.** AS3 version, single device or HA pair, existing partition conventions, and where the agent may install certificates and keys, given that it writes only to its own partitions.
+9. **Keycloak.** Which realm the clients go in, whether the AD groups already reach it through LDAP federation, and whether `KC_HOSTNAME` is already set to the VIP's name.
 
 ## Phases
 
