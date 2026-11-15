@@ -3,7 +3,16 @@ from typing import List, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from core.enums import AuthMethod, JobStatus, Scanner, ScanStatus, Severity, SourceKind
+from core.enums import (
+    AuthMethod,
+    ExposureScope,
+    ExposureStatus,
+    JobStatus,
+    Scanner,
+    ScanStatus,
+    Severity,
+    SourceKind,
+)
 
 
 class ExposureState(str, Enum):
@@ -85,6 +94,10 @@ class PublishedOrigin(BaseModel):
     # entry that published it, so a reader can see it was since removed.
     removed_at: Optional[str] = None
     removed_by: Optional[str] = None
+    # The URL of the VIP that publishes the origin, for the rewrite map of
+    # every app that calls it. None on an entry added by hand until someone
+    # fills it in.
+    url: Optional[str] = None
 
 
 class Service(BaseModel):
@@ -227,6 +240,80 @@ class AppSummary(BaseModel):
     last_scanned_at: Optional[str] = None
     current_scan_id: Optional[str] = None
 
+
+class ExposureNotice(BaseModel):
+    """A reason an exposure cannot be planned, or a warning about one of its
+    services. `code` is stable for the console to key on; `message` is for
+    the admin."""
+
+    code: str
+    message: str
+    # The service it is about; None for one about the whole exposure.
+    service_id: Optional[str] = None
+
+
+class ExposureApp(BaseModel):
+    id: str
+    name: str
+    # The app's own VIP is built from it; planning is blocked while it is None.
+    url: Optional[str] = None
+
+
+class ExposureSummary(BaseModel):
+    """An exposure as the queue and the history list it."""
+
+    model_config = ConfigDict(use_enum_values=True)
+
+    id: str
+    status: ExposureStatus
+    # Every admin write names the version it was made against.
+    version: int
+    app: ExposureApp
+    # The submitted scan the exposure is pinned to.
+    scan_id: str
+    submitted_at: str
+    submitted_by: str
+    created_at: str
+    # The services the exposure gives a VIP.
+    needs_vip_count: int
+    # Whether anything blocks planning; the detail lists what.
+    blocked: bool
+
+
+class ExposureGroup(BaseModel):
+    """A VIP group: the services that will share one VIP."""
+
+    id: str
+    service_ids: List[str]
+
+
+class ExposureService(Service):
+    """One of the scan's services, with what the exposure does with it,
+    worked out against the published-origins registry as it is now."""
+
+    scope: ExposureScope
+    # The group of a service that needs a VIP; None until it is in one, and
+    # for every other scope.
+    group_id: Optional[str] = None
+    # For a published service, the active registry entry that publishes it,
+    # whose `url` the app's rewrite map uses. For an unresolved one, the
+    # removed entry that published it on the scan.
+    registry_entry: Optional[PublishedOrigin] = None
+    warnings: List[ExposureNotice] = Field(default_factory=list)
+
+
+class ExposureDetail(ExposureSummary):
+    """An exposure as the workspace shows it."""
+
+    groups: List[ExposureGroup]
+    # Every service of the scan, in origin order, whatever its scope.
+    services: List[ExposureService]
+    # What blocks planning; empty when a plan can be requested.
+    blocked_by: List[ExposureNotice]
+    # The exposure of the app's earlier submission that this one replaced,
+    # and the one of a later submission that replaced this one.
+    supersedes: Optional[str] = None
+    superseded_by: Optional[str] = None
 
 class CreateAppRequest(BaseModel):
     name: str

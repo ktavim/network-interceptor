@@ -60,6 +60,7 @@ def published_origin_to_schema(row: PublishedOriginRow) -> PublishedOrigin:
         added_at=_isoformat(row.added_at),
         removed_at=_isoformat(row.removed_at),
         removed_by=row.removed_by,
+        url=row.url,
     )
 
 

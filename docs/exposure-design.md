@@ -131,7 +131,7 @@ A failure stops at that step. Retry resumes from it; cancel undoes the completed
 
 ## Console
 
-What the console shows and lets the admin do; how it looks is in [exposure-console-ui.md](exposure-console-ui.md). Every rule it displays, what is in scope, what blocks a plan, what to warn about, is computed by the backend and returned with the exposure, so the console and the plan never disagree.
+What the console shows and lets the admin do; how it looks is in `docs/exposure-console-ui.md` in the exposure-console repository. Every rule it displays, what is in scope, what blocks a plan, what to warn about, is computed by the backend and returned with the exposure, so the console and the plan never disagree.
 
 | Screen | Shows | The admin can |
 |---|---|---|

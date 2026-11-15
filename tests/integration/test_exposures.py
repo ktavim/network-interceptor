@@ -1,0 +1,265 @@
+"""Exposures: created on submit, superseded by the next submission, and read
+by the console's queue, history and workspace endpoints. Against a real
+Postgres. Set TEST_DATABASE_URL to run."""
+import uuid
+from types import SimpleNamespace
+
+import pytest
+from fastapi import HTTPException
+from sqlalchemy import select, update
+
+from api.routes_exposures import get_exposure, list_exposures
+from api.routes_scans import submit_scan
+from core.db import (
+    AppRow,
+    ExposureEventRow,
+    ExposureGroupMemberRow,
+    ExposureRow,
+    PublishedOriginRow,
+    ScanRow,
+    ServiceFindingRow,
+    ServiceRow,
+)
+from core.enums import ExposureStatus
+
+BOTH = ("interceptor", "tracer")
+
+
+def _request(factory) -> SimpleNamespace:
+    return SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(session_factory=factory)))
+
+
+def svc(host, *, scheme="https", port=443, auth="bearer", severity="cleared", excluded=False,
+        found_by=BOTH, published_origin_id=None) -> dict:
+    return dict(scheme=scheme, host=host, port=port, auth=auth, severity=severity,
+                excluded=excluded, found_by=found_by, published_origin_id=published_origin_id)
+
+
+async def _scan(factory, services, *, app_id=None, app_url="https://app.internal") -> tuple[str, str]:
+    """A completed scan with `services`, on a new app unless `app_id` names
+    one. Returns (app id, scan id)."""
+    new_app = app_id is None
+    app_id = app_id or uuid.uuid4().hex
+    scan_id = uuid.uuid4().hex
+    async with factory() as session:
+        if new_app:
+            session.add(AppRow(id=app_id, name="Payroll", url=app_url, owner_ad_group="g"))
+        session.add(ScanRow(id=scan_id, app_id=app_id, name="Payroll", url=app_url or "http://x",
+                            status="completed", started_by="test"))
+        await session.flush()
+        for s in services:
+            service_id = uuid.uuid4().hex
+            session.add(ServiceRow(
+                id=service_id, scan_id=scan_id, scheme=s["scheme"], host=s["host"], port=s["port"],
+                auth_method=s["auth"], severity=s["severity"], excluded=s["excluded"],
+                published_origin_id=s["published_origin_id"], ips=["10.0.0.1"],
+            ))
+            await session.flush()
+            for scanner in s["found_by"]:
+                session.add(ServiceFindingRow(
+                    service_id=service_id, scanner=scanner, auth_method=s["auth"], url_count=1,
+                ))
+        await session.commit()
+    return app_id, scan_id
+
+
+async def _submitted(factory, services, **kwargs) -> tuple[str, str, ExposureRow]:
+    app_id, scan_id = await _scan(factory, services, **kwargs)
+    await submit_scan(scan_id, _request(factory))
+    return app_id, scan_id, await _exposure_of(factory, scan_id)
+
+
+async def _exposure_of(factory, scan_id) -> ExposureRow:
+    async with factory() as session:
+        return (await session.execute(select(ExposureRow).where(ExposureRow.scan_id == scan_id))).scalar_one()
+
+
+async def _register(factory, host, *, url=None, scheme="https", port=443) -> str:
+    entry_id = "pub_" + uuid.uuid4().hex[:10]
+    async with factory() as session:
+        session.add(PublishedOriginRow(id=entry_id, scheme=scheme, host=host, port=port,
+                                       added_by="test", url=url))
+        await session.commit()
+    return entry_id
+
+
+async def _events(factory, exposure_id) -> list[tuple[str, str, dict]]:
+    async with factory() as session:
+        rows = await session.execute(
+            select(ExposureEventRow)
+            .where(ExposureEventRow.exposure_id == exposure_id)
+            .order_by(ExposureEventRow.seq)
+        )
+        return [(r.type, r.actor, r.payload) for r in rows.scalars()]
+
+
+def _hosts(detail, group) -> list[str]:
+    by_id = {s.id: s for s in detail.services}
+    return [f"{by_id[i].host}:{by_id[i].port}" for i in group.service_ids]
+
+
+async def _detail(factory, exposure_id):
+    return await get_exposure(exposure_id, _request(factory))
+
+
+async def _queue(factory, status=None):
+    return await list_exposures(_request(factory), status=status)
+
+
+class TestCreatedOnSubmit:
+    async def test_one_exposure_pinned_to_the_scan_in_grouping(self, factory):
+        _, scan_id, exposure = await _submitted(factory, [svc("a")])
+        assert (exposure.scan_id, exposure.status, exposure.version) == (scan_id, "grouping", 1)
+        assert exposure.id.startswith("exp_")
+        assert await _events(factory, exposure.id) == [
+            ("exposure_created", "jchen", {"scan_id": scan_id, "supersedes": None}),
+        ]
+
+    async def test_the_default_grouping_is_one_vip_per_host(self, factory):
+        _, _, exposure = await _submitted(factory, [
+            svc("b"), svc("a", port=8443), svc("a"), svc("x", excluded=True, severity="blocker", auth="ntlm"),
+        ])
+        detail = await _detail(factory, exposure.id)
+        assert [_hosts(detail, g) for g in detail.groups] == [["a:443", "a:8443"], ["b:443"]]
+
+    async def test_an_origin_registered_after_the_scan_gets_no_group(self, factory):
+        app_id, scan_id = await _scan(factory, [svc("a"), svc("p")])
+        await _register(factory, "p", url="https://p.example.com")
+        await submit_scan(scan_id, _request(factory))
+        detail = await _detail(factory, (await _exposure_of(factory, scan_id)).id)
+        assert [_hosts(detail, g) for g in detail.groups] == [["a:443"]]
+
+    async def test_a_submit_that_fails_creates_no_exposure(self, factory):
+        _, scan_id = await _scan(factory, [svc("a", severity="blocker", auth="ntlm")])
+        with pytest.raises(HTTPException):
+            await submit_scan(scan_id, _request(factory))
+        async with factory() as session:
+            assert (await session.execute(select(ExposureRow))).first() is None
+
+
+class TestSupersede:
+    async def test_a_new_submission_supersedes_the_open_exposure(self, factory):
+        app_id, _, old = await _submitted(factory, [svc("a"), svc("b"), svc("c")])
+        # The admin put a and b on one VIP.
+        async with factory() as session:
+            members = {m.service_id: m for m in (await session.execute(
+                select(ExposureGroupMemberRow).where(ExposureGroupMemberRow.exposure_id == old.id)
+            )).scalars()}
+            hosts = {s.id: s.host for s in (await session.execute(
+                select(ServiceRow).where(ServiceRow.id.in_(members))
+            )).scalars()}
+            a_group = next(m.group_id for sid, m in members.items() if hosts[sid] == "a")
+            b_id = next(sid for sid in members if hosts[sid] == "b")
+            await session.execute(
+                update(ExposureGroupMemberRow)
+                .where(ExposureGroupMemberRow.exposure_id == old.id, ExposureGroupMemberRow.service_id == b_id)
+                .values(group_id=a_group)
+            )
+            await session.commit()
+
+        # The new scan drops c and adds d, and a second port on b.
+        _, new_scan_id = await _scan(factory, [svc("a"), svc("b"), svc("b", port=8443), svc("d")], app_id=app_id)
+        await submit_scan(new_scan_id, _request(factory))
+        new = await _exposure_of(factory, new_scan_id)
+
+        old_detail = await _detail(factory, old.id)
+        assert (old_detail.status, old_detail.superseded_by) == ("superseded", new.id)
+        new_detail = await _detail(factory, new.id)
+        assert (new_detail.status, new_detail.supersedes) == ("grouping", old.id)
+        assert [_hosts(new_detail, g) for g in new_detail.groups] == [
+            ["a:443", "b:443", "b:8443"], ["d:443"],
+        ]
+        assert (await _events(factory, old.id))[-1] == ("exposure_superseded", "jchen", {"by": new.id})
+        assert (await _events(factory, new.id))[0][2]["supersedes"] == old.id
+
+        assert [e.id for e in await _queue(factory)] == [new.id]
+        assert [e.id for e in await _queue(factory, [ExposureStatus.superseded])] == [old.id]
+
+    async def test_a_planned_exposure_cannot_be_superseded_yet(self, factory):
+        app_id, _, old = await _submitted(factory, [svc("a")])
+        async with factory() as session:
+            await session.execute(
+                update(ExposureRow).where(ExposureRow.id == old.id).values(status="planning")
+            )
+            await session.commit()
+        _, scan_id = await _scan(factory, [svc("a")], app_id=app_id)
+        with pytest.raises(NotImplementedError):
+            await submit_scan(scan_id, _request(factory))
+
+
+class TestQueue:
+    async def test_open_exposures_oldest_submission_first(self, factory):
+        _, _, first = await _submitted(factory, [svc("a"), svc("b")])
+        _, _, second = await _submitted(factory, [svc("c")], app_url=None)
+        queue = await _queue(factory)
+        assert [(e.id, e.needs_vip_count, e.blocked) for e in queue] == [
+            (first.id, 2, False), (second.id, 1, True),
+        ]
+        assert (queue[0].app.name, queue[0].submitted_by, queue[0].status) == ("Payroll", "jchen", "grouping")
+
+    async def test_history_newest_first(self, factory):
+        _, _, first = await _submitted(factory, [svc("a")])
+        _, _, second = await _submitted(factory, [svc("a")])
+        async with factory() as session:
+            await session.execute(update(ExposureRow).values(status="cancelled"))
+            await session.commit()
+        assert await _queue(factory) == []
+        history = await _queue(factory, [ExposureStatus.cancelled, ExposureStatus.deployed])
+        assert [e.id for e in history] == [second.id, first.id]
+
+
+class TestWorkspace:
+    async def test_unknown_exposure_is_404(self, factory):
+        with pytest.raises(HTTPException) as e:
+            await _detail(factory, "exp_nope")
+        assert e.value.status_code == 404
+
+    async def test_scopes_warnings_and_what_blocks_planning(self, factory):
+        entry = await _register(factory, "p")
+        _, scan_id, exposure = await _submitted(factory, [
+            svc("a", found_by=("interceptor",)),
+            svc("k", auth="kerberos"),
+            svc("l", auth="login_redirect"),
+            svc("p", severity="published", auth="ntlm", published_origin_id=entry),
+            svc("x", severity="blocker", auth="ntlm", excluded=True),
+        ])
+        detail = await _detail(factory, exposure.id)
+        by_host = {s.host: s for s in detail.services}
+        assert {h: s.scope for h, s in by_host.items()} == {
+            "a": "needs_vip", "k": "needs_vip", "l": "needs_vip", "p": "published", "x": "excluded",
+        }
+        assert [w.code for w in by_host["a"].warnings] == ["interceptor_only"]
+        assert [w.code for w in by_host["l"].warnings] == ["login_redirect"]
+        assert by_host["p"].registry_entry.id == entry and by_host["p"].group_id is None
+        assert by_host["a"].group_id in {g.id for g in detail.groups}
+        assert [(n.code, n.service_id) for n in detail.blocked_by] == [
+            ("kerberos_unsupported", by_host["k"].id),
+            ("published_url_missing", by_host["p"].id),
+        ]
+        assert (detail.needs_vip_count, detail.blocked, detail.version) == (3, True, 1)
+        assert (detail.app.url, detail.scan_id) == ("https://app.internal", scan_id)
+
+    async def test_a_service_published_since_leaves_its_group(self, factory):
+        _, _, exposure = await _submitted(factory, [svc("a"), svc("b")])
+        await _register(factory, "b", url="https://b.example.com")
+        detail = await _detail(factory, exposure.id)
+        b = next(s for s in detail.services if s.host == "b")
+        assert (b.scope, b.group_id, b.registry_entry.url) == ("published", None, "https://b.example.com")
+        assert [_hosts(detail, g) for g in detail.groups] == [["a:443"], []]
+        assert (detail.needs_vip_count, detail.blocked_by) == (1, [])
+
+    async def test_a_service_whose_entry_was_removed_since(self, factory):
+        entry = await _register(factory, "p")
+        _, _, exposure = await _submitted(factory, [
+            svc("p", severity="published", auth="ntlm", published_origin_id=entry),
+        ])
+        async with factory() as session:
+            await session.execute(
+                update(PublishedOriginRow).where(PublishedOriginRow.id == entry)
+                .values(removed_at=PublishedOriginRow.added_at, removed_by="test")
+            )
+            await session.commit()
+        detail = await _detail(factory, exposure.id)
+        [p] = detail.services
+        assert (p.scope, p.registry_entry.id) == ("unresolved", entry)
+        assert [n.code for n in detail.blocked_by] == ["published_origin_removed"]

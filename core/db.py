@@ -9,6 +9,7 @@ from sqlalchemy import (
     CheckConstraint,
     DateTime,
     ForeignKey,
+    ForeignKeyConstraint,
     Index,
     Integer,
     String,
@@ -28,7 +29,15 @@ from sqlalchemy.ext.asyncio import (
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
-from .enums import AuthMethod, JobStatus, Scanner, ScanStatus, Severity
+from .enums import (
+    CLOSED_EXPOSURE_STATUSES,
+    AuthMethod,
+    ExposureStatus,
+    JobStatus,
+    Scanner,
+    ScanStatus,
+    Severity,
+)
 
 
 def _utcnow() -> datetime:
@@ -186,6 +195,11 @@ class PublishedOriginRow(Base):
     )
     removed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     removed_by: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    # The URL of the VIP that publishes the origin, which replaces it in the
+    # rewrite map of every app that calls it. Set by an exposure's deploy;
+    # NULL on an entry added by hand until someone fills it in, and until
+    # then an app that calls the origin cannot be planned.
+    url: Mapped[Optional[str]] = mapped_column(String, nullable=True)
 
 
 class ServiceRow(Base):
@@ -397,6 +411,114 @@ class ScanEventRow(Base):
     payload: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)
 
     scan: Mapped[ScanRow] = relationship("ScanRow", back_populates="events")
+
+
+_CLOSED_EXPOSURES = ", ".join(f"'{status.value}'" for status in CLOSED_EXPOSURE_STATUSES)
+
+
+class ExposureRow(Base):
+    """Publishing one submission of an app through the F5
+    (docs/exposure-design.md). Created with the submission, in the same
+    transaction, and pinned to its scan: the services it publishes are that
+    scan's. The work waiting for the deployment agent is an exposure whose
+    status says it is waiting; there is no other queue."""
+    __tablename__ = "exposures"
+    __table_args__ = (
+        _one_of("exposures", "status", ExposureStatus),
+        # A new submission supersedes the app's open exposure in the same
+        # transaction, so an app never has two.
+        Index(
+            "uq_exposures_open_per_app",
+            "app_id",
+            unique=True,
+            postgresql_where=text(f"status NOT IN ({_CLOSED_EXPOSURES})"),
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    app_id: Mapped[str] = mapped_column(
+        String, ForeignKey("apps.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    # The submitted scan; its submission says who submitted it and when.
+    scan_id: Mapped[str] = mapped_column(
+        String, ForeignKey("scans.id", ondelete="CASCADE"), unique=True, nullable=False
+    )
+    status: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    # Incremented by every change to the grouping, and by a cancel. Each admin
+    # write names the version it was made against, and a result from the
+    # agent for an older one is dropped.
+    version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, nullable=False
+    )
+    # When a plan was first requested. Until then the exposure holds nothing
+    # for the agent to release, so cancelling or superseding it is immediate.
+    first_planned_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    # The exposure of the newer submission that replaced this one.
+    superseded_by_id: Mapped[Optional[str]] = mapped_column(
+        String,
+        ForeignKey("exposures.id", ondelete="SET NULL", name="fk_exposures_superseded_by_id"),
+        nullable=True,
+    )
+
+
+class ExposureGroupRow(Base):
+    """One VIP group of an exposure: the services that will share a VIP."""
+    __tablename__ = "exposure_groups"
+    __table_args__ = (
+        UniqueConstraint("exposure_id", "position", name="uq_exposure_groups_position"),
+        # The target of exposure_group_members' composite key, which keeps a
+        # member's group in the member's exposure.
+        UniqueConstraint("exposure_id", "id", name="uq_exposure_groups_exposure_id"),
+    )
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    exposure_id: Mapped[str] = mapped_column(
+        String, ForeignKey("exposures.id", ondelete="CASCADE"), nullable=False
+    )
+    # The group's place in the console's list, from 0.
+    position: Mapped[int] = mapped_column(Integer, nullable=False)
+
+
+class ExposureGroupMemberRow(Base):
+    """A service's place in one of its exposure's groups. Keyed by exposure
+    and service, so a service is in at most one group; that it is in one at
+    all is checked when a grouping is saved and when a plan is requested."""
+    __tablename__ = "exposure_group_members"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["exposure_id", "group_id"],
+            ["exposure_groups.exposure_id", "exposure_groups.id"],
+            ondelete="CASCADE",
+            name="fk_exposure_group_members_group",
+        ),
+    )
+
+    exposure_id: Mapped[str] = mapped_column(
+        String, ForeignKey("exposures.id", ondelete="CASCADE"), primary_key=True
+    )
+    service_id: Mapped[str] = mapped_column(
+        String, ForeignKey("services.id", ondelete="CASCADE"), primary_key=True
+    )
+    group_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
+
+
+class ExposureEventRow(Base):
+    """An exposure's event log: every admin action, who made it and when, and
+    every step the agent reports."""
+    __tablename__ = "exposure_events"
+
+    exposure_id: Mapped[str] = mapped_column(
+        String, ForeignKey("exposures.id", ondelete="CASCADE"), primary_key=True
+    )
+    seq: Mapped[int] = mapped_column(Integer, primary_key=True)
+    ts: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    type: Mapped[str] = mapped_column(String, nullable=False)
+    # The admin's username, or "agent".
+    actor: Mapped[str] = mapped_column(String, nullable=False)
+    payload: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)
 
 
 async def load_services(

@@ -9,7 +9,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from config_tracer.settings import ScanSettings
-from core import jobs
+from core import exposures, jobs
 from core.db import (
     AppRow,
     ScanJobRow,
@@ -411,10 +411,12 @@ async def submit_scan(scan_id: str, request: Request) -> SubmitScanResponse:
         # outside our commit's try/except.
         app_row = await session.get(AppRow, scan.app_id)
         submission_id = "sub_" + uuid.uuid4().hex[:10]
+        submitted_at = datetime.now(timezone.utc)
         session.add(
             SubmissionRow(
                 id=submission_id,
                 scan_id=scan_id,
+                submitted_at=submitted_at,
                 submitted_by=_STUB_USER.username,
             )
         )
@@ -422,7 +424,9 @@ async def submit_scan(scan_id: str, request: Request) -> SubmitScanResponse:
         if app_row is not None:
             app_row.current_scan_id = scan_id
         try:
-            await session.commit()
+            # Flushed on its own, so the try catches only the submission's
+            # unique constraint, not an error from the exposure below.
+            await session.flush()
         except IntegrityError:
             # Lost a race: another submit committed first and the unique
             # constraint on submissions.scan_id rejected ours. The in-transaction
@@ -432,6 +436,16 @@ async def submit_scan(scan_id: str, request: Request) -> SubmitScanResponse:
                 status_code=409,
                 detail={"message": "this scan has already been submitted"},
             )
+        # The exposure that publishes it, in the same transaction, so the F5
+        # admins' queue never misses a submission.
+        await exposures.create_for_submission(
+            session,
+            app_id=scan.app_id,
+            scan_id=scan_id,
+            submitted_by=_STUB_USER.username,
+            now=submitted_at,
+        )
+        await session.commit()
         return SubmitScanResponse(submission_id=submission_id)
 
 
