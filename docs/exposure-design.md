@@ -29,7 +29,7 @@ deployment agent  -->  IP reservation ("DHCP") service
 deployment agent  -->  DNS service (DNS team): records and certificates
 ```
 
-Every arrow points from the side that opens the connection. The internal network cannot reach the management network, and nothing here needs it to: the agent polls the backend for work and reports back on the same connection. The admin's browser talks only to Keycloak and the backend, never to the agent.
+Every arrow points from the side that opens the connection. The internal network cannot reach the management network, and nothing here needs it to: the agent polls the backend for work and reports back on the same connection. The IP reservation and DNS services are reachable from the management network, so the agent calls them directly. The admin's browser talks only to Keycloak and the backend, never to the agent.
 
 | Secret | Held by |
 |---|---|
@@ -217,9 +217,8 @@ On the backend VIP, an LTM policy accepts `/api/agent/*` only from the agent hos
 3. **The IP reservation service.** Its API: reserve and release, idempotency, whether a reservation expires.
 4. **How the F5 rewrites.** A rewrite profile in URI-translation mode, or a stream profile with an iRule: which the AS3 version in use supports, and how each handles compressed and chunked bodies and the headers listed under Rewriting.
 5. **The agent's source address.** Whether the backend VIP's source allowlist may include the agent. If not, the fallback is the browser relaying signed plans, with the costs listed above.
-6. **Reachability from the management network.** The IP reservation and DNS services, for the agent. Keycloak is reachable through its VIP.
-7. **The F5 itself.** AS3 version, single device or HA pair, existing partition conventions, and where the agent may install certificates and keys, given that it writes only to its own partitions.
-8. **Keycloak.** Which realm the clients go in, whether the AD groups already reach it through LDAP federation, and whether `KC_HOSTNAME` is already set to the VIP's name.
+6. **The F5 itself.** AS3 version, single device or HA pair, existing partition conventions, and where the agent may install certificates and keys, given that it writes only to its own partitions.
+7. **Keycloak.** Which realm the clients go in, whether the AD groups already reach it through LDAP federation, and whether `KC_HOSTNAME` is already set to the VIP's name.
 
 ## Phases
 
