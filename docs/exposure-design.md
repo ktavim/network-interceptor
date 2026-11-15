@@ -129,6 +129,68 @@ What it cannot do, which the plan should flag:
 
 A failure stops at that step. Retry resumes from it; cancel undoes the completed steps in reverse.
 
+## Console
+
+What the console shows and lets the admin do, not how it looks. Every rule it displays, what is in scope, what blocks a plan, what to warn about, is computed by the backend and returned with the exposure, so the console and the plan never disagree.
+
+| Screen | Shows | The admin can |
+|---|---|---|
+| **Queue** | Open exposures, oldest submission first: app, submitted when and by whom, status, how many services need a VIP, whether anything blocks planning | Open one |
+| **History** | Closed exposures (`deployed`, `cancelled`, `superseded`), newest first | Open one |
+| **Workspace** | One exposure; its body depends on the status (below) | What the status allows |
+
+The workspace always shows the app, its `url`, the scan the exposure is pinned to, the status and the exposure's event log: every admin action with who and when, and every step the agent reported.
+
+| Status | Body | The admin can |
+|---|---|---|
+| `grouping` | The VIP groups and their services; the `published` services with their registry URLs and the excluded ones, read-only; each service's warnings; what blocks planning | Move services between groups, add and remove groups, save, request a plan, cancel |
+| `planning` | The grouping, and the agent's steps as they arrive | Change the grouping (back to `grouping`), cancel |
+| `awaiting_confirmation` | The plan: each VIP's IP, DNS names, certificate names and expiry, and services, each with its original origin and the URL that replaces it; the app's VIP and its whole rewrite map, `published` services included; the declaration; the dry-run diff; the warnings | Confirm, change the grouping (back to `grouping`), cancel |
+| `deploying` | The confirmed plan, who confirmed it, and the agent's steps as they arrive | Nothing; a deploy in progress cannot be stopped |
+| `deployed` | The confirmed plan, the F5 and DNS references | Nothing until decommissioning |
+| `failed` | The step that failed, the agent's message and its step log; what the exposure holds | Retry, cancel |
+| `cancelling`, `cancelled` | What is being or was released | Nothing |
+| `superseded` | What was carried over, and a link to the exposure that replaced it | Nothing |
+
+**What blocks planning.** The backend refuses to plan, and the workspace lists the reasons before the admin asks:
+
+- a service not in exactly one group;
+- an unexcluded Kerberos service (see Scope of an exposure);
+- the app has no `url`;
+- a `published` service whose registry entry has no URL (see Order of execution, step 6).
+
+The last two are fixed in the workspace itself, through the two non-exposure endpoints under Admin API.
+
+**Warnings.** The backend attaches them to services; they do not block planning, and the confirm screen repeats them next to the confirm button:
+
+- *Found only by the interceptor*: the service's `found_by` lacks the tracer, so its origin may be assembled at runtime and left unrewritten (see Rewriting).
+- *Login redirect*: a `login_redirect` service; its identity provider must accept a redirect URI on the app's new name.
+
+The scan does not record whether the app loads bundles with Subresource Integrity, so the confirm screen states that limit for every app rather than per service. Compressed responses are handled by the agent's template, not flagged per app (open question 4).
+
+**Two admins at once.** Every write carries the version the admin was looking at. A write for an older version is refused, and the console reloads the exposure. A workspace open on an exposure follows its event stream, so a grouping saved by another admin shows up at once, with who saved it; if the admin has unsaved changes, the console says so and offers to reload, discarding them. A save moves the exposure back to `grouping` at once, so the console never shows a plan for a grouping that has since changed.
+
+**Cancel and retry say what they will do.** Cancel lists what the exposure holds and will be released: IP reservations, certificates on the F5, DNS records. Retry names the step it resumes from. Both lists come from the agent's events, since the agent's own record is what it acts on.
+
+## Admin API
+
+Every endpoint here requires the `admin` role (see Identity). Errors follow the rest of the API: `404` for an unknown exposure, `409` for a request the exposure's status or version does not allow, with the current status and version in the body so the console can reload, and `422` for a malformed body.
+
+| Method | Path | Does |
+|---|---|---|
+| `GET` | `/api/exposures` | The queue: open exposures, oldest submission first. `?status=` selects others, for the history |
+| `GET` | `/api/exposures/{id}` | The workspace: status, version, app, scan, the services in scope with their groups, the `published` and excluded ones, warnings, what blocks planning, the current plan, who confirmed it, the failed step |
+| `PUT` | `/api/exposures/{id}/groups` | Replace the grouping. Body: the version and the groups, each a list of service IDs. Allowed in `grouping`, `planning` and `awaiting_confirmation`; moves the exposure to `grouping` and increments its version. A grouping that does not put each in-scope service in exactly one group is refused with an error per service |
+| `POST` | `/api/exposures/{id}/plan` | Request a plan. Body: the version. `grouping` to `planning`; refused, with the reasons, while anything blocks planning |
+| `POST` | `/api/exposures/{id}/confirm` | Approve the plan. Body: the version and the plan's hash. `awaiting_confirmation` to `deploying`; records who confirmed. Refused if the hash is not the current plan's |
+| `POST` | `/api/exposures/{id}/retry` | Body: the version. `failed` to `planning` or `deploying`, resuming from the failed step |
+| `POST` | `/api/exposures/{id}/cancel` | Body: the version. To `cancelled` from `grouping` if never planned; otherwise to `cancelling` from `grouping`, `planning`, `awaiting_confirmation` or `failed`. Increments the version, so a plan in flight is dropped. Refused in `deploying` and `deployed` |
+| `GET` | `/api/exposures/{id}/events` | The exposure's event stream over SSE, resumable with `Last-Event-ID`, as a scan's is. Carries admin actions as well as the agent's steps; a closed exposure's stream replays and ends |
+| `PATCH` | `/api/apps/{id}` | Set the app's `url` |
+| `PATCH` | `/api/published-origins/{id}` | Set the URL of the VIP that publishes a registry entry added by hand |
+
+Requesting a plan, confirming, retrying and cancelling are each a status change the backend makes in one transaction with the event that records it, so the event log and the status never disagree.
+
 ## Backend and agent protocol
 
 The agent pulls; the backend never calls it. All agent endpoints are under their own prefix and accept only tokens issued to the agent (see Identity).
@@ -172,7 +234,7 @@ Both callers authenticate against the org's Keycloak, through its VIP, and the b
 | Keycloak client | `exposure-console`, public, authorization code with PKCE | `exposure-agent`, confidential, service account enabled, standard flow off |
 | Proves itself to Keycloak by | Signing in | Signed JWT: a private key on the agent host; Keycloak has the public key |
 | Token carries | Client role `admin` of `exposure-api` | Client role `agent` of `exposure-api` |
-| May call | The exposure endpoints | `/api/agent/*` only |
+| May call | The endpoints under Admin API | `/api/agent/*` only |
 
 `exposure-api` is a bearer-only client that stands for the backend. Both clients get an audience mapper adding `exposure-api` to `aud`, which Keycloak leaves out by default. The F5 admin AD group is mapped to the `admin` role in Keycloak, so the backend checks a role rather than a group name; the `agent` role is assigned to the agent's service account only.
 
