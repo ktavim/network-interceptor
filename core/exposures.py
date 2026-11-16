@@ -26,6 +26,7 @@ from .db import (
 )
 from .enums import (
     CLOSED_EXPOSURE_STATUSES,
+    NON_EXCLUSIVE_EXPOSURE_STATUSES,
     AuthMethod,
     ExposureScope,
     ExposureStatus,
@@ -142,10 +143,12 @@ def assess(
     group_of: Mapping[str, str],
     registry: Mapping[Origin, PublishedOriginRow],
     scan_entries: Mapping[str, PublishedOriginRow] = {},
+    deploying: Sequence[str] = (),
 ) -> Assessment:
     """The scope of every service of an exposure's scan, the warnings on the
     ones the rewrite map covers, and the reasons planning is blocked.
 
+    `deploying` is the app's other exposures that are deploying.
     `found_by` maps a service id to the scanners that found it, `group_of` a
     grouped service's id to its group's, and `scan_entries` a service id to
     the registry entry its published_origin_id points at.
@@ -153,6 +156,13 @@ def assess(
     out = Assessment()
     if not app_url:
         out.blocked_by.append(Notice("app_url_missing", "The app has no URL; set one to plan its VIP."))
+    for exposure_id in deploying:
+        # Its origins reach the registry when it has deployed; planning before
+        # then would plan them a second time.
+        out.blocked_by.append(Notice(
+            "earlier_exposure_deploying",
+            f"{exposure_id}, an earlier submission of this app, is still deploying; plan once it has finished.",
+        ))
     for service in services:
         scope = scope_of(service, registry, scan_entries.get(service.id))
         if scope.scope in (ExposureScope.needs_vip, ExposureScope.published):
@@ -262,6 +272,19 @@ async def load_found_by(session: AsyncSession, scan_ids: Sequence[str]) -> dict[
     return out
 
 
+async def load_deploying(session: AsyncSession, app_ids: Sequence[str]) -> dict[str, list[str]]:
+    """The ids of each app's exposures that are deploying, by app id."""
+    rows = await session.execute(
+        select(ExposureRow.app_id, ExposureRow.id)
+        .where(ExposureRow.app_id.in_(app_ids), ExposureRow.status == ExposureStatus.deploying.value)
+        .order_by(ExposureRow.created_at)
+    )
+    out: dict[str, list[str]] = {app_id: [] for app_id in app_ids}
+    for app_id, exposure_id in rows.all():
+        out[app_id].append(exposure_id)
+    return out
+
+
 async def load_group_members(
     session: AsyncSession, exposure_ids: Sequence[str]
 ) -> dict[str, dict[str, str]]:
@@ -290,6 +313,8 @@ async def emit_exposure_event(
     event_type: str,
     actor: str,
     payload: Optional[dict[str, Any]] = None,
+    *,
+    agent_seq: Optional[int] = None,
 ) -> ExposureEventRow:
     """Add an event to the caller's transaction, with the next seq."""
     # As core.events.emit_event: held to commit, so max() sees every seq
@@ -311,6 +336,7 @@ async def emit_exposure_event(
         type=event_type,
         actor=actor,
         payload=payload or {},
+        agent_seq=agent_seq,
     )
     session.add(row)
     await session.flush()
@@ -378,37 +404,44 @@ async def create_for_submission(
     session: AsyncSession, *, app_id: str, scan_id: str, submitted_by: str, now: datetime
 ) -> ExposureRow:
     """The exposure of a submission, added to the submit's transaction, with
-    the default grouping of the services that need a VIP. An exposure the app
-    still has open is superseded by it, and its grouping carried over for the
-    origins the two share.
-    """
-    open_exposure = (
-        await session.execute(
-            select(ExposureRow)
-            .where(
-                ExposureRow.app_id == app_id,
-                ExposureRow.status.not_in([s.value for s in CLOSED_EXPOSURE_STATUSES]),
-            )
-            .with_for_update()
-        )
-    ).scalar_one_or_none()
+    the default grouping of the services that need a VIP.
 
-    previous: list[list[Origin]] = []
-    if open_exposure is not None:
-        if (
-            open_exposure.status != ExposureStatus.grouping.value
-            or open_exposure.first_planned_at is not None
-        ):
-            # Unreachable until plans exist: such an exposure holds IP
-            # reservations and certificates, and superseding it goes through
-            # `cancelling`, with the agent releasing what the new one does not
-            # take over (exposure-design.md, Lifecycle).
-            raise NotImplementedError(
-                f"superseding a {open_exposure.status} exposure that was planned is not built yet"
+    The app's open exposure, if it has one in grouping, planning, awaiting
+    confirmation or failed, is superseded by it. One that never asked for a
+    plan holds nothing and closes at once; any other goes to `cancelling`,
+    for the agent to release what it holds, and closes as superseded when the
+    agent is done. An exposure that is deploying is left to finish, and one
+    already cancelling to wind down. The new exposure starts from the
+    grouping of the one it supersedes, or failing that of the one deploying,
+    for the origins they share.
+    """
+    others = list(
+        (
+            await session.execute(
+                select(ExposureRow)
+                .where(
+                    ExposureRow.app_id == app_id,
+                    ExposureRow.status.not_in([s.value for s in CLOSED_EXPOSURE_STATUSES]),
+                )
+                .order_by(ExposureRow.created_at.desc())
+                .with_for_update()
             )
-        previous = await _previous_grouping(session, open_exposure.id)
-        # Closed before the new one is inserted: an app has one open exposure.
-        open_exposure.status = ExposureStatus.superseded.value
+        ).scalars()
+    )
+    non_exclusive = {s.value for s in NON_EXCLUSIVE_EXPOSURE_STATUSES}
+    superseded = next((e for e in others if e.status not in non_exclusive), None)
+    deploying = next((e for e in others if e.status == ExposureStatus.deploying.value), None)
+
+    template = superseded or deploying
+    previous = await _previous_grouping(session, template.id) if template is not None else []
+    if superseded is not None:
+        if superseded.status == ExposureStatus.grouping.value and superseded.first_planned_at is None:
+            superseded.status = ExposureStatus.superseded.value
+        else:
+            superseded.status = ExposureStatus.cancelling.value
+            # A plan or result in flight for the old version is dropped.
+            superseded.version += 1
+        # Out of the exclusive statuses before the new one is inserted.
         await session.flush()
 
     registry = await load_registry(session)
@@ -428,13 +461,19 @@ async def create_for_submission(
     await _add_grouping(session, exposure.id, propose_grouping(needs_vip, previous))
     await emit_exposure_event(session, exposure.id, "exposure_created", submitted_by, {
         "scan_id": scan_id,
-        "supersedes": open_exposure.id if open_exposure is not None else None,
+        "supersedes": superseded.id if superseded is not None else None,
     })
-    if open_exposure is not None:
-        open_exposure.superseded_by_id = exposure.id
-        await emit_exposure_event(
-            session, open_exposure.id, "exposure_superseded", submitted_by, {"by": exposure.id}
-        )
+    if superseded is not None:
+        superseded.superseded_by_id = exposure.id
+        if superseded.status == ExposureStatus.superseded.value:
+            await emit_exposure_event(
+                session, superseded.id, "exposure_superseded", submitted_by, {"by": exposure.id}
+            )
+        else:
+            await emit_exposure_event(
+                session, superseded.id, "supersede_requested", submitted_by,
+                {"by": exposure.id, "version": superseded.version},
+            )
     return exposure
 
 
@@ -542,6 +581,7 @@ async def save_grouping(
     previous = exposure.status
     exposure.version += 1
     exposure.status = ExposureStatus.grouping.value
+    exposure.plan = exposure.plan_hash = exposure.plan_version = None
     payload: dict[str, Any] = {"version": exposure.version, "groups": len(kept)}
     if previous != ExposureStatus.grouping.value:
         # The plan for the old grouping is dropped; the agent's result for it,

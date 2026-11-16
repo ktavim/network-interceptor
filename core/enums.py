@@ -87,13 +87,31 @@ class ExposureStatus(str, Enum):
     superseded = "superseded"
 
 
-# The statuses no exposure leaves: the history. Every other one is open, and an
-# app has at most one open exposure.
+# The statuses no exposure leaves: the history. Every other one is open.
 CLOSED_EXPOSURE_STATUSES = (
     ExposureStatus.deployed,
     ExposureStatus.cancelled,
     ExposureStatus.superseded,
 )
+
+
+# The statuses an exposure can be in alongside another of its app's: the
+# closed ones; deploying, which cannot be stopped, so a new submission leaves
+# it to finish; and cancelling, which is winding down already. Of the rest,
+# the exposures a new submission supersedes, an app has at most one.
+NON_EXCLUSIVE_EXPOSURE_STATUSES = (
+    *CLOSED_EXPOSURE_STATUSES,
+    ExposureStatus.deploying,
+    ExposureStatus.cancelling,
+)
+
+
+class ExposurePhase(str, Enum):
+    """What the agent is doing for an exposure: the status it works in, and
+    the phase a result or a failure belongs to."""
+    planning = "planning"
+    deploying = "deploying"
+    cancelling = "cancelling"
 
 
 class ExposureScope(str, Enum):

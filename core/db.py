@@ -31,7 +31,9 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 from .enums import (
     CLOSED_EXPOSURE_STATUSES,
+    NON_EXCLUSIVE_EXPOSURE_STATUSES,
     AuthMethod,
+    ExposurePhase,
     ExposureStatus,
     JobStatus,
     Scanner,
@@ -413,7 +415,7 @@ class ScanEventRow(Base):
     scan: Mapped[ScanRow] = relationship("ScanRow", back_populates="events")
 
 
-_CLOSED_EXPOSURES = ", ".join(f"'{status.value}'" for status in CLOSED_EXPOSURE_STATUSES)
+_NON_EXCLUSIVE_EXPOSURES = ", ".join(f"'{s.value}'" for s in NON_EXCLUSIVE_EXPOSURE_STATUSES)
 
 
 class ExposureRow(Base):
@@ -425,13 +427,15 @@ class ExposureRow(Base):
     __tablename__ = "exposures"
     __table_args__ = (
         _one_of("exposures", "status", ExposureStatus),
+        _one_of("exposures", "failed_phase", ExposurePhase),
         # A new submission supersedes the app's open exposure in the same
-        # transaction, so an app never has two.
+        # transaction, so an app never has two, except one still deploying,
+        # which finishes alongside the new one.
         Index(
             "uq_exposures_open_per_app",
             "app_id",
             unique=True,
-            postgresql_where=text(f"status NOT IN ({_CLOSED_EXPOSURES})"),
+            postgresql_where=text(f"status NOT IN ({_NON_EXCLUSIVE_EXPOSURES})"),
         ),
     )
 
@@ -462,6 +466,20 @@ class ExposureRow(Base):
         ForeignKey("exposures.id", ondelete="SET NULL", name="fk_exposures_superseded_by_id"),
         nullable=True,
     )
+    # The agent's plan for `plan_version`: IPs, names, certificates, the AS3
+    # declaration and its dry-run diff. Never a private key. Kept after
+    # confirmation, as what was approved; dropped when the grouping changes.
+    plan: Mapped[Optional[dict[str, Any]]] = mapped_column(JSONB, nullable=True)
+    # sha256 of the plan's canonical JSON, computed here; confirming names it.
+    plan_hash: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    plan_version: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    confirmed_by: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    confirmed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Set while `failed`: the phase that failed, the agent's step and message.
+    # Retry resumes that phase.
+    failed_phase: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    failed_step: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    failed_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
 
 class ExposureGroupRow(Base):
@@ -509,6 +527,17 @@ class ExposureEventRow(Base):
     """An exposure's event log: every admin action, who made it and when, and
     every step the agent reports."""
     __tablename__ = "exposure_events"
+    __table_args__ = (
+        # The agent numbers its reports per exposure; one it sends twice, say
+        # after a lost response, is recorded once.
+        Index(
+            "uq_exposure_events_agent_seq",
+            "exposure_id",
+            "agent_seq",
+            unique=True,
+            postgresql_where=text("agent_seq IS NOT NULL"),
+        ),
+    )
 
     exposure_id: Mapped[str] = mapped_column(
         String, ForeignKey("exposures.id", ondelete="CASCADE"), primary_key=True
@@ -518,6 +547,8 @@ class ExposureEventRow(Base):
     type: Mapped[str] = mapped_column(String, nullable=False)
     # The admin's username, or "agent".
     actor: Mapped[str] = mapped_column(String, nullable=False)
+    # The agent's own sequence number for a step it reported; NULL otherwise.
+    agent_seq: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     payload: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)
 
 

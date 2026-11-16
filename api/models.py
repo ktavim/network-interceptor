@@ -1,11 +1,12 @@
 from enum import Enum
-from typing import List, Optional
+from typing import Any, Dict, List, Literal, Optional
 from urllib.parse import urlsplit, urlunsplit
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from core.enums import (
     AuthMethod,
+    ExposurePhase,
     ExposureScope,
     ExposureStatus,
     JobStatus,
@@ -315,6 +316,67 @@ class ExposureDetail(ExposureSummary):
     # and the one of a later submission that replaced this one.
     supersedes: Optional[str] = None
     superseded_by: Optional[str] = None
+    # The agent's plan, from `awaiting_confirmation` on: what the admin
+    # confirms, by its hash. None before a plan, and once the grouping changes.
+    plan: Optional[Dict[str, Any]] = None
+    plan_hash: Optional[str] = None
+    plan_version: Optional[int] = None
+    confirmed_by: Optional[str] = None
+    confirmed_at: Optional[str] = None
+    # Set while `failed`: what failed, for the admin to retry or cancel.
+    failed: Optional["ExposureFailure"] = None
+
+
+class ExposureFailure(BaseModel):
+    model_config = ConfigDict(use_enum_values=True)
+
+    # The phase retry resumes.
+    phase: ExposurePhase
+    step: Optional[str] = None
+    message: Optional[str] = None
+
+
+class VersionRequest(BaseModel):
+    """An admin action on an exposure, made against the version they saw."""
+
+    version: int
+
+
+class ConfirmRequest(VersionRequest):
+    """Approve the plan with this hash, and no other."""
+
+    plan_hash: str
+
+
+class AgentStepRequest(BaseModel):
+    """One step the agent reports. `seq` is the agent's own number for it,
+    unique per exposure: a repeat is recorded once."""
+
+    seq: int = Field(ge=0)
+    version: int
+    step: str
+    state: Literal["started", "done", "failed", "skipped", "info"]
+    message: Optional[str] = None
+    detail: Optional[Dict[str, Any]] = None
+
+
+class AgentResultRequest(BaseModel):
+    """The outcome of a phase, for a version. `plan` with a planning result
+    that succeeded; `step` and `message` with one that failed."""
+
+    model_config = ConfigDict(use_enum_values=False)
+
+    version: int
+    phase: ExposurePhase
+    outcome: Literal["ok", "failed"]
+    plan: Optional[Dict[str, Any]] = None
+    step: Optional[str] = None
+    message: Optional[str] = None
+
+
+class AgentResultResponse(BaseModel):
+    # False for a result about another version, or a status already left.
+    applied: bool
 
 def _clean_url(value: str, schemes: tuple[str, ...]) -> str:
     """A URL with one of `schemes` and a host, its scheme and host lowercased

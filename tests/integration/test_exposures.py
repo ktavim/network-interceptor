@@ -182,17 +182,6 @@ class TestSupersede:
         assert [e.id for e in await _queue(factory)] == [new.id]
         assert [e.id for e in await _queue(factory, [ExposureStatus.superseded])] == [old.id]
 
-    async def test_a_planned_exposure_cannot_be_superseded_yet(self, factory):
-        app_id, _, old = await _submitted(factory, [svc("a")])
-        async with factory() as session:
-            await session.execute(
-                update(ExposureRow).where(ExposureRow.id == old.id).values(status="planning")
-            )
-            await session.commit()
-        _, scan_id = await _scan(factory, [svc("a")], app_id=app_id)
-        with pytest.raises(NotImplementedError):
-            await submit_scan(scan_id, _request(factory))
-
 
 class TestQueue:
     async def test_open_exposures_oldest_submission_first(self, factory):

@@ -15,18 +15,21 @@ from sse_starlette.sse import EventSourceResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from core import exposures
+from core import exposure_lifecycle, exposures
 from core.db import AppRow, ExposureRow, SubmissionRow, load_services
 from core.enums import CLOSED_EXPOSURE_STATUSES, ExposureScope, ExposureStatus
 
 from .models import (
+    ConfirmRequest,
     ExposureApp,
     ExposureDetail,
+    ExposureFailure,
     ExposureGroup,
     ExposureNotice,
     ExposureService,
     ExposureSummary,
     SaveGroupingRequest,
+    VersionRequest,
 )
 from .routes_me import _STUB_USER
 from .serialize import _isoformat, published_origin_to_schema, service_to_schema
@@ -92,6 +95,7 @@ async def list_exposures(
         services = await exposures.load_scan_services(session, scan_ids)
         members = await exposures.load_group_members(session, [e.id for e, *_ in rows])
         registry = await exposures.load_registry(session)
+        deploying = await exposures.load_deploying(session, list({e.app_id for e, *_ in rows}))
 
     out = []
     for exposure, app, submitted_at, submitted_by in rows:
@@ -103,6 +107,7 @@ async def list_exposures(
             found_by={},
             group_of=members[exposure.id],
             registry=registry,
+            deploying=[d for d in deploying[exposure.app_id] if d != exposure.id],
         )
         out.append(ExposureSummary(**_summary(exposure, app, submitted_at, submitted_by, assessment)))
     return out
@@ -130,6 +135,7 @@ async def _detail(session: AsyncSession, exposure_id: str) -> ExposureDetail:
     groups = await exposures.load_groups(session, exposure.id)
     group_of = (await exposures.load_group_members(session, [exposure.id]))[exposure.id]
     registry = await exposures.load_registry(session)
+    deploying = (await exposures.load_deploying(session, [exposure.app_id]))[exposure.app_id]
     supersedes = (
         await session.execute(
             select(ExposureRow.id).where(ExposureRow.superseded_by_id == exposure.id)
@@ -148,6 +154,7 @@ async def _detail(session: AsyncSession, exposure_id: str) -> ExposureDetail:
         scan_entries={
             service.id: entry for service, _, _, _, entry in loaded if entry is not None
         },
+        deploying=[d for d in deploying if d != exposure.id],
     )
 
     services: List[ExposureService] = []
@@ -182,6 +189,18 @@ async def _detail(session: AsyncSession, exposure_id: str) -> ExposureDetail:
         blocked_by=[_notice(n) for n in assessment.blocked_by],
         supersedes=supersedes,
         superseded_by=exposure.superseded_by_id,
+        plan=exposure.plan,
+        plan_hash=exposure.plan_hash,
+        plan_version=exposure.plan_version,
+        confirmed_by=exposure.confirmed_by,
+        confirmed_at=_isoformat(exposure.confirmed_at),
+        failed=(
+            ExposureFailure(
+                phase=exposure.failed_phase, step=exposure.failed_step, message=exposure.failed_message
+            )
+            if exposure.failed_phase
+            else None
+        ),
     )
 
 
@@ -292,3 +311,60 @@ async def exposure_events(exposure_id: str, request: Request):
                 bus.unsubscribe_exposure(exposure_id, wake)
 
     return EventSourceResponse(event_gen())
+
+
+async def _locked(session: AsyncSession, exposure_id: str) -> ExposureRow:
+    exposure = (
+        await session.execute(select(ExposureRow).where(ExposureRow.id == exposure_id).with_for_update())
+    ).scalar_one_or_none()
+    if exposure is None:
+        raise _not_found()
+    return exposure
+
+
+async def _act(request: Request, exposure_id: str, action) -> ExposureDetail:
+    """Run a status change in one transaction with the event that records it,
+    and return the exposure as it now stands."""
+    async with _session_factory(request)() as session:
+        exposure = await _locked(session, exposure_id)
+        try:
+            await action(session, exposure)
+        except exposure_lifecycle.Refused as refused:
+            raise HTTPException(status_code=refused.status_code, detail=refused.detail)
+        await session.commit()
+        return await _detail(session, exposure_id)
+
+
+@router.post("/exposures/{exposure_id}/plan", response_model=ExposureDetail)
+async def request_plan(exposure_id: str, body: VersionRequest, request: Request) -> ExposureDetail:
+    """`grouping` to `planning`. Refused with 409, and the reasons as
+    `blocked_by`, while anything blocks planning."""
+    return await _act(request, exposure_id, lambda s, e: exposure_lifecycle.request_plan(
+        s, e, body.version, _STUB_USER.username
+    ))
+
+
+@router.post("/exposures/{exposure_id}/confirm", response_model=ExposureDetail)
+async def confirm_plan(exposure_id: str, body: ConfirmRequest, request: Request) -> ExposureDetail:
+    """`awaiting_confirmation` to `deploying`, for the plan with `plan_hash`.
+    Any admin may confirm, including the one who asked for the plan."""
+    return await _act(request, exposure_id, lambda s, e: exposure_lifecycle.confirm(
+        s, e, body.version, body.plan_hash, _STUB_USER.username
+    ))
+
+
+@router.post("/exposures/{exposure_id}/retry", response_model=ExposureDetail)
+async def retry_exposure(exposure_id: str, body: VersionRequest, request: Request) -> ExposureDetail:
+    """`failed` back to the phase that failed."""
+    return await _act(request, exposure_id, lambda s, e: exposure_lifecycle.retry(
+        s, e, body.version, _STUB_USER.username
+    ))
+
+
+@router.post("/exposures/{exposure_id}/cancel", response_model=ExposureDetail)
+async def cancel_exposure(exposure_id: str, body: VersionRequest, request: Request) -> ExposureDetail:
+    """To `cancelled` if never planned, otherwise to `cancelling` for the
+    agent to release what the exposure holds. Refused while deploying."""
+    return await _act(request, exposure_id, lambda s, e: exposure_lifecycle.cancel(
+        s, e, body.version, _STUB_USER.username
+    ))
