@@ -61,6 +61,7 @@ def published_origin_to_schema(row: PublishedOriginRow) -> PublishedOrigin:
         removed_at=_isoformat(row.removed_at),
         removed_by=row.removed_by,
         url=row.url,
+        exposure_id=row.exposure_id,
     )
 
 

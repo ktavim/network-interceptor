@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Iterable, Mapping, Optional, Sequence
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .db import (
@@ -28,6 +28,7 @@ from .enums import (
     CLOSED_EXPOSURE_STATUSES,
     NON_EXCLUSIVE_EXPOSURE_STATUSES,
     AuthMethod,
+    ExposurePhase,
     ExposureScope,
     ExposureStatus,
     Scanner,
@@ -241,6 +242,15 @@ async def load_registry(session: AsyncSession) -> dict[Origin, PublishedOriginRo
         select(PublishedOriginRow).where(PublishedOriginRow.removed_at.is_(None))
     )
     return {origin_of(row): row for row in rows.scalars()}
+
+
+def registry_for(
+    registry: Mapping[Origin, PublishedOriginRow], exposure_id: str
+) -> dict[Origin, PublishedOriginRow]:
+    """The registry as one exposure reads it: without the entries its own
+    deploy registered. Those are the services it publishes, not services
+    someone else published."""
+    return {origin: entry for origin, entry in registry.items() if entry.exposure_id != exposure_id}
 
 
 async def load_scan_services(
@@ -589,6 +599,73 @@ async def save_grouping(
         payload["from_status"] = previous
     await emit_exposure_event(session, exposure.id, "grouping_saved", actor, payload)
     await session.flush()
+
+
+async def drop_published_from_groupings(
+    session: AsyncSession, origins: Sequence[Origin], *, by: str, actor: str
+) -> list[str]:
+    """Take the services on `origins`, which exposure `by` has just
+    published, out of the groupings of the other open exposures, so that none
+    gives them a second VIP. Each exposure changed loses its plan and returns
+    to grouping with a new version, so a plan in flight for it is dropped,
+    and records an event naming the origins. A failed exposure changes only if
+    its plan failed: a failed deploy has a confirmed plan, which cancel undoes.
+    Returns the ids of the exposures changed."""
+    if not origins:
+        return []
+    statuses = [s.value for s in (*EDITABLE_STATUSES, ExposureStatus.failed)]
+    rows = (
+        await session.execute(
+            select(ExposureRow, ExposureGroupMemberRow.service_id, ServiceRow)
+            .join(ExposureGroupMemberRow, ExposureGroupMemberRow.exposure_id == ExposureRow.id)
+            .join(ServiceRow, ServiceRow.id == ExposureGroupMemberRow.service_id)
+            .where(
+                ExposureRow.id != by,
+                ExposureRow.status.in_(statuses),
+                tuple_(ServiceRow.scheme, ServiceRow.host, ServiceRow.port).in_(list(origins)),
+            )
+            .order_by(ExposureRow.id)
+            .with_for_update(of=ExposureRow)
+        )
+    ).all()
+    affected: dict[str, tuple[ExposureRow, list[ServiceRow]]] = {}
+    for exposure, _, service in rows:
+        if exposure.status == ExposureStatus.failed.value and exposure.failed_phase != ExposurePhase.planning.value:
+            continue
+        affected.setdefault(exposure.id, (exposure, []))[1].append(service)
+
+    for exposure, services in affected.values():
+        await session.execute(
+            delete(ExposureGroupMemberRow).where(
+                ExposureGroupMemberRow.exposure_id == exposure.id,
+                ExposureGroupMemberRow.service_id.in_([s.id for s in services]),
+            )
+        )
+        # The groups left empty go too, as a save drops empty groups.
+        await session.execute(
+            delete(ExposureGroupRow).where(
+                ExposureGroupRow.exposure_id == exposure.id,
+                ExposureGroupRow.id.not_in(
+                    select(ExposureGroupMemberRow.group_id).where(
+                        ExposureGroupMemberRow.exposure_id == exposure.id
+                    )
+                ),
+            )
+        )
+        previous = exposure.status
+        exposure.version += 1
+        exposure.status = ExposureStatus.grouping.value
+        exposure.plan = exposure.plan_hash = exposure.plan_version = None
+        exposure.failed_phase = exposure.failed_step = exposure.failed_message = None
+        payload: dict[str, Any] = {
+            "version": exposure.version,
+            "by": by,
+            "origins": sorted(format_origin(origin_of(s)) for s in services),
+        }
+        if previous != ExposureStatus.grouping.value:
+            payload["from_status"] = previous
+        await emit_exposure_event(session, exposure.id, "grouping_pruned", actor, payload)
+    return list(affected)
 
 
 async def notify_open_exposures(

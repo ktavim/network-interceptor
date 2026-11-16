@@ -1,6 +1,6 @@
 # Exposure: publishing submitted apps through the F5
 
-Status: draft. Nothing here is built yet.
+Status: phases 2 to 5 are built, against fake IP reservation, DNS and F5 services in the agent; see Phases.
 
 A second frontend, for the F5 BIG-IP administrators, that takes each submitted app the rest of the way: it shows the external services the app calls that still need a VIP, lets the admin decide which services share a VIP, reserves the IP addresses, deploys the VIPs to the F5 and creates their DNS records. Browsers outside the internal network then reach the app and every service it calls through the F5, which rewrites the app's responses to point at the new names. Inside the internal network the app is unchanged.
 
@@ -130,6 +130,16 @@ What it cannot do, which the plan should flag:
 6. **Register**: the backend adds each origin to the published-origins registry, with the URL of the VIP that publishes it. The registry gains a column for that URL, which other apps' rewrite maps read. Entries added by hand before this have none, and must be given one before an app that calls them can be exposed.
 
 A failure stops at that step. Retry resumes from it; cancel undoes the completed steps in reverse.
+
+As built in phase 5:
+
+- The agent deploys its own copy of the plan, which it keeps under the plan's hash; the backend sends only the confirmed hash. A hash the agent has no plan for fails the deploy at its first step.
+- The agent's deploy steps are `recheck` (the reservations and the dry-run diff are still the plan's), `deploy`, `verify` and `dns`. Before posting, it keeps the partition's current declaration; cancelling a failed deploy deletes the DNS records it created, re-posts that declaration (or removes the partition if there was none), removes the certificates and releases the reservations, in that order. Retry skips the steps the step log has done for the version.
+- Verify checks that every virtual server is available, that every pool has a member up (a member down is reported, not failed), and that a page fetched through the app's VIP, by its new name, names none of the original origins.
+- AS3 declares a partition whole, so a later exposure of the same app keeps the VIPs the earlier ones deployed in its declaration, and re-renders only the app's VIP. That VIP keeps its address, certificate and DNS name, which the earlier exposure holds; the later plan creates only its services' names, so cancelling it cannot delete the app's.
+- Registering marks each entry with the exposure that registered it. That exposure reads its own entries as the services it publishes, so a deployed exposure still shows them as its own. An origin someone else registered between the plan and the deploy keeps its entry; the deployment lists it as already registered.
+- Registering also takes the newly published origins out of the groupings of the other open exposures (in `grouping`, `planning`, `awaiting_confirmation`, or `failed` while planning). Each one changed returns to `grouping` with a new version, dropping its plan, so no origin gets a second VIP. The app's newer exposure, blocked while this one deployed, is told it can now be planned.
+- Not decided yet: whether the app's own origin is registered too, for other apps that call it. Phase 5 registers only its services.
 
 ## Console
 
@@ -290,7 +300,7 @@ On the backend VIP, an LTM policy accepts `/api/agent/*` only from the agent hos
 2. **Read-only**: exposures created on submit, the queue and detail endpoints, the console's queue and workspace against mocked data.
 3. **Grouping**: saving and validating groups in the backend, the grouping UI.
 4. **Planning**: the agent protocol, the agent with fake adapters, IP reservation, certificate requests, AS3 rendering with the app's rewrite map and dry run, the confirm screen.
-5. **Deploy**: deploy, verify, DNS, registry, retry and undo, live progress; end to end against a lab BIG-IP VE.
+5. **Deploy**: deploy, verify, DNS, registry, retry and undo, live progress; end to end against a lab BIG-IP VE. Built against the fake adapters; the lab run waits on Discovery.
 6. **Hardening**: real authentication and roles, the audit view, decommissioning a VIP.
 
 ## Later

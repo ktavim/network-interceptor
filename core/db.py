@@ -202,6 +202,14 @@ class PublishedOriginRow(Base):
     # NULL on an entry added by hand until someone fills it in, and until
     # then an app that calls the origin cannot be planned.
     url: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    # The exposure whose deploy registered the entry; NULL for one added by
+    # hand. That exposure reads its own entries as the services it publishes,
+    # not as published by someone else.
+    exposure_id: Mapped[Optional[str]] = mapped_column(
+        String,
+        ForeignKey("exposures.id", ondelete="SET NULL", name="fk_published_origins_exposure_id"),
+        nullable=True,
+    )
 
 
 class ServiceRow(Base):
@@ -480,6 +488,11 @@ class ExposureRow(Base):
     failed_phase: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     failed_step: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     failed_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # Once deployed: the agent's references on the F5 and in DNS (the
+    # partition, its virtual servers, the records it created), and the
+    # origins this deploy registered as published.
+    deployment: Mapped[Optional[dict[str, Any]]] = mapped_column(JSONB, nullable=True)
+    deployed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class ExposureGroupRow(Base):

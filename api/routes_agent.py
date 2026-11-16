@@ -62,14 +62,15 @@ async def report_result(exposure_id: str, body: AgentResultRequest, request: Req
     for a result about an older version or a status the exposure has left."""
     if body.outcome == "ok" and body.phase.value == "planning" and body.plan is None:
         raise HTTPException(status_code=422, detail={"message": "a planning result needs its plan"})
+    if body.outcome == "ok" and body.phase.value == "deploying" and body.deployment is None:
+        raise HTTPException(
+            status_code=422, detail={"message": "a deploying result needs the deployment's references"}
+        )
     async with _session_factory(request)() as session:
         exposure = await _exposure(session, exposure_id)
-        try:
-            applied = await exposure_lifecycle.apply_agent_result(
-                session, exposure, version=body.version, phase=body.phase,
-                ok=body.outcome == "ok", plan=body.plan, step=body.step, message=body.message,
-            )
-        except NotImplementedError as e:
-            raise HTTPException(status_code=501, detail={"message": str(e)})
+        applied = await exposure_lifecycle.apply_agent_result(
+            session, exposure, version=body.version, phase=body.phase, ok=body.outcome == "ok",
+            plan=body.plan, deployment=body.deployment, step=body.step, message=body.message,
+        )
         await session.commit()
     return AgentResultResponse(applied=applied)

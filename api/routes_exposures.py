@@ -106,7 +106,7 @@ async def list_exposures(
             services=services[exposure.scan_id],
             found_by={},
             group_of=members[exposure.id],
-            registry=registry,
+            registry=exposures.registry_for(registry, exposure.id),
             deploying=[d for d in deploying[exposure.app_id] if d != exposure.id],
         )
         out.append(ExposureSummary(**_summary(exposure, app, submitted_at, submitted_by, assessment)))
@@ -150,7 +150,7 @@ async def _detail(session: AsyncSession, exposure_id: str) -> ExposureDetail:
             for service, _, findings, _, _ in loaded
         },
         group_of=group_of,
-        registry=registry,
+        registry=exposures.registry_for(registry, exposure.id),
         scan_entries={
             service.id: entry for service, _, _, _, entry in loaded if entry is not None
         },
@@ -201,6 +201,8 @@ async def _detail(session: AsyncSession, exposure_id: str) -> ExposureDetail:
             if exposure.failed_phase
             else None
         ),
+        deployment=exposure.deployment,
+        deployed_at=_isoformat(exposure.deployed_at),
     )
 
 

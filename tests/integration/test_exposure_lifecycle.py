@@ -4,13 +4,13 @@ submission does to an exposure that holds something. Against a real Postgres.
 Set TEST_DATABASE_URL to run."""
 import pytest
 from fastapi import HTTPException
-from sqlalchemy import update
+from sqlalchemy import select, update
 
 from api.models import AgentResultRequest, AgentStepRequest, ConfirmRequest, VersionRequest
 from api.routes_agent import pending, report_result, report_step
 from api.routes_exposures import cancel_exposure, confirm_plan, request_plan, retry_exposure
 from api.routes_scans import submit_scan
-from core.db import ExposureRow
+from core.db import ExposureRow, PublishedOriginRow
 
 from .test_exposures import _detail, _events, _register, _request, _save, _scan, _submitted, svc
 
@@ -110,11 +110,12 @@ class TestAgentProtocol:
         detail = await _detail(factory, exposure.id)
         assert (detail.status, detail.plan) == ("grouping", None)
 
-    async def test_a_deploy_result_is_not_handled_yet(self, factory):
+    async def test_a_deploy_result_needs_its_references(self, factory):
         _, detail = await _planned(factory)
         await confirm_plan(detail.id, ConfirmRequest(version=1, plan_hash=detail.plan_hash), _request(factory))
         error = await _refused(_result(factory, detail.id, 1, "deploying"))
-        assert error.status_code == 501
+        assert error.status_code == 422
+        assert (await _detail(factory, detail.id)).status == "deploying"
 
 
 class TestConfirm:
@@ -204,3 +205,153 @@ class TestNewSubmission:
         assert [(n.code, old.id in n.message) for n in new.blocked_by] == [("earlier_exposure_deploying", True)]
         error = await _refused(_plan(factory, new_id))
         assert [n["code"] for n in error.detail["blocked_by"]] == ["earlier_exposure_deploying"]
+
+
+def _real_plan(detail) -> dict:
+    """A plan the shape the agent sends, publishing each grouped service at
+    https://<host>.example.com."""
+    by_id = {s.id: s for s in detail.services}
+    return {
+        "summary": {"add": 3, "change": 0, "destroy": 0},
+        "vips": [
+            {
+                "group_id": g.id,
+                "ip": f"203.0.113.{i + 1}",
+                "services": [
+                    {"service_id": sid, "url": f"https://{by_id[sid].host}.example.com"} for sid in g.service_ids
+                ],
+            }
+            for i, g in enumerate(detail.groups)
+        ],
+    }
+
+
+DEPLOYMENT = {
+    "partition": "exp_app",
+    "public_url": "https://payroll.example.com",
+    "virtual_servers": ["/exp_app/app/vs_app"],
+    "dns_records": [{"name": "payroll.example.com", "type": "A", "target": "203.0.113.9", "id": "rec_1"}],
+}
+
+
+async def _deploying(factory, services, *, app_id=None):
+    """An exposure confirmed with a real-shaped plan: (app id, detail)."""
+    app_id, _, exposure = await _submitted(factory, services)
+    await _plan(factory, exposure.id)
+    detail = await _detail(factory, exposure.id)
+    assert await _result(factory, exposure.id, 1, "planning", plan=_real_plan(detail))
+    detail = await _detail(factory, exposure.id)
+    await confirm_plan(detail.id, ConfirmRequest(version=1, plan_hash=detail.plan_hash), _request(factory))
+    return app_id, await _detail(factory, exposure.id)
+
+
+async def _exposure_by_scan(factory, scan_id) -> ExposureRow:
+    async with factory() as session:
+        return (await session.execute(select(ExposureRow).where(ExposureRow.scan_id == scan_id))).scalar_one()
+
+
+async def _registry(factory) -> list[tuple[str, str, str]]:
+    async with factory() as session:
+        rows = await session.execute(
+            select(PublishedOriginRow).where(PublishedOriginRow.removed_at.is_(None)).order_by(PublishedOriginRow.host)
+        )
+        return [(r.host, r.url, r.exposure_id) for r in rows.scalars()]
+
+
+class TestDeploy:
+    async def test_the_agent_gets_the_confirmed_hash_only(self, factory):
+        _, detail = await _deploying(factory, [svc("a")])
+        [item] = await pending(_request(factory))
+        assert (item["status"], item["deploying"]) == ("deploying", {"plan_hash": detail.plan_hash})
+
+    async def test_a_deploy_registers_its_origins_and_closes(self, factory):
+        _, detail = await _deploying(factory, [svc("b"), svc("a")])
+        assert await _result(factory, detail.id, 1, "deploying", deployment=DEPLOYMENT)
+        deployed = await _detail(factory, detail.id)
+        assert (deployed.status, deployed.deployed_at is not None) == ("deployed", True)
+        assert deployed.deployment == {
+            **DEPLOYMENT,
+            "registered": [
+                {"origin": "https://a", "url": "https://a.example.com"},
+                {"origin": "https://b", "url": "https://b.example.com"},
+            ],
+            "already_registered": [],
+        }
+        assert await _registry(factory) == [
+            ("a", "https://a.example.com", detail.id), ("b", "https://b.example.com", detail.id),
+        ]
+        # Its own entries do not make its services published.
+        assert {s.scope for s in deployed.services} == {"needs_vip"}
+        assert deployed.blocked_by == []
+        assert [e[0] for e in (await _events(factory, detail.id))[-2:]] == ["origins_registered", "exposure_deployed"]
+        # A repeat is dropped.
+        assert not await _result(factory, detail.id, 1, "deploying", deployment=DEPLOYMENT)
+
+    async def test_an_origin_registered_since_the_plan_keeps_its_entry(self, factory):
+        _, detail = await _deploying(factory, [svc("a")])
+        await _register(factory, "a", url="https://by-hand.example.com")
+        assert await _result(factory, detail.id, 1, "deploying", deployment=DEPLOYMENT)
+        deployed = await _detail(factory, detail.id)
+        assert deployed.deployment["registered"] == []
+        assert deployed.deployment["already_registered"] == [
+            {"origin": "https://a", "url": "https://by-hand.example.com"},
+        ]
+        assert await _registry(factory) == [("a", "https://by-hand.example.com", None)]
+
+    async def test_the_newer_submission_is_unblocked_and_loses_what_was_published(self, factory):
+        app_id, old = await _deploying(factory, [svc("a"), svc("b")])
+        _, scan_id = await _scan(factory, [svc("a"), svc("c")], app_id=app_id)
+        await submit_scan(scan_id, _request(factory))
+        new_id = (await _exposure_by_scan(factory, scan_id)).id
+        before = await _detail(factory, new_id)
+        assert [n.code for n in before.blocked_by] == ["earlier_exposure_deploying"]
+        assert len([sid for g in before.groups for sid in g.service_ids]) == 2
+
+        assert await _result(factory, old.id, 1, "deploying", deployment=DEPLOYMENT)
+        after = await _detail(factory, new_id)
+        assert (after.status, after.version, after.blocked_by) == ("grouping", 2, [])
+        by_host = {s.host: s for s in after.services}
+        assert (by_host["a"].scope, by_host["a"].registry_entry.url) == ("published", "https://a.example.com")
+        assert [g.service_ids for g in after.groups] == [[by_host["c"].id]]
+        events = await _events(factory, new_id)
+        assert [e[:2] for e in events[-2:]] == [("grouping_pruned", "agent"), ("earlier_exposure_deployed", "agent")]
+        assert events[-2][2] == {"version": 2, "by": old.id, "origins": ["https://a"]}
+
+        await _plan(factory, new_id, version=2)
+        item = next(i for i in await pending(_request(factory)) if i["id"] == new_id)
+        assert [[s["host"] for s in g["services"]] for g in item["planning"]["groups"]] == [["c"]]
+        assert item["planning"]["published"] == [
+            {"scheme": "https", "host": "a", "port": 443, "url": "https://a.example.com"},
+        ]
+
+    async def test_another_apps_plan_for_the_same_origin_is_dropped(self, factory):
+        _, first = await _deploying(factory, [svc("shared")])
+        _, other = await _planned(factory, [svc("shared"), svc("d")])
+        assert other.status == "awaiting_confirmation"
+        assert await _result(factory, first.id, 1, "deploying", deployment=DEPLOYMENT)
+        after = await _detail(factory, other.id)
+        assert (after.status, after.version, after.plan) == ("grouping", 2, None)
+        assert [len(g.service_ids) for g in after.groups] == [1]
+        assert (await _events(factory, other.id))[-1] == ("grouping_pruned", "agent", {
+            "version": 2, "by": first.id, "origins": ["https://shared"], "from_status": "awaiting_confirmation",
+        })
+        # The agent's plan for the old version is dropped when it arrives.
+        assert not await _result(factory, other.id, 1, "planning", plan=PLAN)
+
+    async def test_a_failed_deploy_retries_then_cancels(self, factory):
+        _, detail = await _deploying(factory, [svc("a")])
+        assert await _result(factory, detail.id, 1, "deploying", outcome="failed",
+                             step="verify", message="vs_app is down")
+        failed = await _detail(factory, detail.id)
+        assert (failed.status, failed.failed.phase, failed.failed.step) == ("failed", "deploying", "verify")
+        retried = await retry_exposure(detail.id, VersionRequest(version=1), _request(factory))
+        assert retried.status == "deploying"
+        [item] = await pending(_request(factory))
+        assert item["deploying"] == {"plan_hash": detail.plan_hash}
+        assert await _result(factory, detail.id, 1, "deploying", outcome="failed", step="dns", message="zone refused")
+        cancelling = await cancel_exposure(detail.id, VersionRequest(version=1), _request(factory))
+        assert (cancelling.status, cancelling.version) == ("cancelling", 2)
+        assert await _result(factory, detail.id, 2, "cancelling")
+        assert (await _detail(factory, detail.id)).status == "cancelled"
+        assert await _registry(factory) == []
+

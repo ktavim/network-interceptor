@@ -100,6 +100,8 @@ class PublishedOrigin(BaseModel):
     # every app that calls it. None on an entry added by hand until someone
     # fills it in.
     url: Optional[str] = None
+    # The exposure whose deploy registered the entry; None for one added by hand.
+    exposure_id: Optional[str] = None
 
 
 class Service(BaseModel):
@@ -325,6 +327,10 @@ class ExposureDetail(ExposureSummary):
     confirmed_at: Optional[str] = None
     # Set while `failed`: what failed, for the admin to retry or cancel.
     failed: Optional["ExposureFailure"] = None
+    # Once deployed: the agent's references on the F5 and in DNS, and the
+    # origins the deploy registered as published.
+    deployment: Optional[Dict[str, Any]] = None
+    deployed_at: Optional[str] = None
 
 
 class ExposureFailure(BaseModel):
@@ -362,7 +368,8 @@ class AgentStepRequest(BaseModel):
 
 class AgentResultRequest(BaseModel):
     """The outcome of a phase, for a version. `plan` with a planning result
-    that succeeded; `step` and `message` with one that failed."""
+    that succeeded, `deployment` with a deploying one; `step` and `message`
+    with one that failed."""
 
     model_config = ConfigDict(use_enum_values=False)
 
@@ -370,6 +377,9 @@ class AgentResultRequest(BaseModel):
     phase: ExposurePhase
     outcome: Literal["ok", "failed"]
     plan: Optional[Dict[str, Any]] = None
+    # The references the deploy created: the partition, its virtual servers,
+    # the DNS records, the app's public URL.
+    deployment: Optional[Dict[str, Any]] = None
     step: Optional[str] = None
     message: Optional[str] = None
 

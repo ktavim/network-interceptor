@@ -11,14 +11,16 @@ the status moved on, is dropped.
 """
 import hashlib
 import json
+import uuid
 from datetime import datetime, timezone
 from typing import Any, Optional
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from . import exposures
-from .db import AppRow, ExposureEventRow, ExposureGroupMemberRow, ExposureRow, ServiceRow
+from .db import AppRow, ExposureEventRow, ExposureGroupMemberRow, ExposureRow, PublishedOriginRow, ServiceRow
 from .enums import ExposurePhase, ExposureScope, ExposureStatus
 
 AGENT = "agent"
@@ -63,7 +65,7 @@ async def assess_exposure(session: AsyncSession, exposure: ExposureRow) -> expos
         services=services,
         found_by={},
         group_of=group_of,
-        registry=await exposures.load_registry(session),
+        registry=exposures.registry_for(await exposures.load_registry(session), exposure.id),
         deploying=[e for e in deploying if e != exposure.id],
     )
 
@@ -121,7 +123,8 @@ async def confirm(
 
 async def cancel(session: AsyncSession, exposure: ExposureRow, version: int, actor: str) -> None:
     """To `cancelled` at once if the exposure never asked for a plan, so holds
-    nothing; otherwise to `cancelling`, for the agent to release what it holds.
+    nothing; otherwise to `cancelling`, for the agent to release what it holds
+    and, after a failed deploy, to undo the steps it completed, in reverse.
     Increments the version, so a plan in flight is dropped."""
     _check(exposure, version, CANCELLABLE_STATUSES, "cancelled")
     exposure.version += 1
@@ -167,7 +170,9 @@ async def pending(session: AsyncSession) -> list[dict[str, Any]]:
         if exposure.status == ExposureStatus.planning.value:
             item["planning"] = await _planning_payload(session, exposure)
         elif exposure.status == ExposureStatus.deploying.value:
-            item["deploying"] = {"plan_hash": exposure.plan_hash, "plan": exposure.plan}
+            # The hash only: the agent deploys its own copy of the plan it
+            # made, never a declaration the backend sends.
+            item["deploying"] = {"plan_hash": exposure.plan_hash}
         else:
             item["cancelling"] = {"superseded_by": exposure.superseded_by_id}
         out.append(item)
@@ -181,7 +186,7 @@ async def _planning_payload(session: AsyncSession, exposure: ExposureRow) -> dic
     app = await session.get(AppRow, exposure.app_id)
     services = (await exposures.load_scan_services(session, [exposure.scan_id]))[exposure.scan_id]
     by_id = {s.id: s for s in services}
-    registry = await exposures.load_registry(session)
+    registry = exposures.registry_for(await exposures.load_registry(session), exposure.id)
     members = (
         await session.execute(
             select(ExposureGroupMemberRow).where(ExposureGroupMemberRow.exposure_id == exposure.id)
@@ -189,10 +194,16 @@ async def _planning_payload(session: AsyncSession, exposure: ExposureRow) -> dic
     ).scalars()
     in_group: dict[str, list[ServiceRow]] = {}
     for member in members:
-        in_group.setdefault(member.group_id, []).append(by_id[member.service_id])
+        service = by_id[member.service_id]
+        # A grouped service published since by another exposure is not
+        # planned twice; the next save drops it from the grouping.
+        if exposures.scope_of(service, registry).scope is ExposureScope.needs_vip:
+            in_group.setdefault(member.group_id, []).append(service)
     groups = []
     for group in await exposures.load_groups(session, exposure.id):
         grouped = sorted(in_group.get(group.id, []), key=lambda s: (s.host, s.port, s.scheme))
+        if not grouped:
+            continue
         groups.append({
             "id": group.id,
             "services": [
@@ -249,7 +260,8 @@ async def record_agent_step(
 
 async def apply_agent_result(
     session: AsyncSession, exposure: ExposureRow, *, version: int, phase: ExposurePhase, ok: bool,
-    plan: Optional[dict[str, Any]], step: Optional[str], message: Optional[str],
+    plan: Optional[dict[str, Any]] = None, deployment: Optional[dict[str, Any]] = None,
+    step: Optional[str] = None, message: Optional[str] = None,
 ) -> bool:
     """Apply the agent's outcome of a phase; False, and nothing changes, for a
     result about another version or a status the exposure has left, which
@@ -286,6 +298,82 @@ async def apply_agent_result(
             exposure.status = ExposureStatus.cancelled.value
             await exposures.emit_exposure_event(session, exposure.id, "exposure_cancelled", AGENT, {})
     else:
-        # Deploy, verify, DNS and the registry come in phase 5.
-        raise NotImplementedError("deploy results are not handled yet")
+        if deployment is None:
+            raise ValueError("a deploying result needs the deployment's references")
+        await _deployed(session, exposure, deployment)
     return True
+
+
+async def _deployed(session: AsyncSession, exposure: ExposureRow, deployment: dict[str, Any]) -> None:
+    """`deploying` to `deployed` (docs/exposure-design.md, Order of execution,
+    step 6): register each origin the plan published, with the URL that
+    replaces it, take those origins out of the other open exposures'
+    groupings, and tell the app's other open exposures, which could not be
+    planned while this one deployed."""
+    registered, kept, origins = await _register_origins(session, exposure)
+    exposure.status = ExposureStatus.deployed.value
+    exposure.deployed_at = datetime.now(timezone.utc)
+    exposure.deployment = {**deployment, "registered": registered, "already_registered": kept}
+    await exposures.emit_exposure_event(
+        session, exposure.id, "origins_registered", AGENT,
+        {"registered": registered, "already_registered": kept},
+    )
+    # This one is deployed before the others are looked up.
+    await session.flush()
+    await exposures.drop_published_from_groupings(session, origins, by=exposure.id, actor=AGENT)
+    await exposures.notify_open_exposures(
+        session, "earlier_exposure_deployed", AGENT, {"by": exposure.id}, app_id=exposure.app_id
+    )
+    await exposures.emit_exposure_event(
+        session, exposure.id, "exposure_deployed", AGENT, {"public_url": deployment.get("public_url")}
+    )
+
+
+async def _register_origins(
+    session: AsyncSession, exposure: ExposureRow
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[exposures.Origin]]:
+    """Add each origin the confirmed plan published to the registry, as this
+    exposure's entry, with the URL of the VIP that publishes it. Returns what
+    was registered, what someone else registered since the plan, which keeps
+    its entry and the URL it has, and the origins registered."""
+    url_of = {
+        s["service_id"]: s["url"]
+        for vip in (exposure.plan or {}).get("vips", [])
+        for s in vip.get("services", [])
+    }
+    services = (
+        await session.execute(
+            select(ServiceRow)
+            .where(ServiceRow.scan_id == exposure.scan_id, ServiceRow.id.in_(list(url_of)))
+            .order_by(ServiceRow.host, ServiceRow.port, ServiceRow.scheme)
+        )
+    ).scalars()
+    registry = await exposures.load_registry(session)
+    registered, kept, origins = [], [], []
+    for service in services:
+        origin = exposures.origin_of(service)
+        item = {"origin": exposures.format_origin(origin), "url": url_of[service.id]}
+        entry = registry.get(origin)
+        if entry is not None and entry.exposure_id != exposure.id:
+            kept.append({**item, "url": entry.url})
+            continue
+        if entry is None:
+            try:
+                async with session.begin_nested():
+                    session.add(PublishedOriginRow(
+                        id="pub_" + uuid.uuid4().hex[:10],
+                        scheme=service.scheme,
+                        host=service.host,
+                        port=service.port,
+                        note=f"VIP of exposure {exposure.id}",
+                        added_by=AGENT,
+                        url=item["url"],
+                        exposure_id=exposure.id,
+                    ))
+            except IntegrityError:
+                # Registered by hand a moment ago; that entry stands.
+                kept.append({**item, "url": None})
+                continue
+        registered.append(item)
+        origins.append(origin)
+    return registered, kept, origins
