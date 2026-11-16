@@ -26,7 +26,9 @@ from .models import (
     ExposureNotice,
     ExposureService,
     ExposureSummary,
+    SaveGroupingRequest,
 )
+from .routes_me import _STUB_USER
 from .serialize import _isoformat, published_origin_to_schema, service_to_schema
 
 router = APIRouter()
@@ -109,21 +111,30 @@ async def list_exposures(
 @router.get("/exposures/{exposure_id}", response_model=ExposureDetail)
 async def get_exposure(exposure_id: str, request: Request) -> ExposureDetail:
     async with _session_factory(request)() as session:
-        row = (
-            await session.execute(_with_submission().where(ExposureRow.id == exposure_id))
-        ).first()
-        if row is None:
-            raise HTTPException(status_code=404, detail={"message": "exposure not found"})
-        exposure, app, submitted_at, submitted_by = row
-        loaded = await load_services(session, exposure.scan_id)
-        groups = await exposures.load_groups(session, exposure.id)
-        group_of = (await exposures.load_group_members(session, [exposure.id]))[exposure.id]
-        registry = await exposures.load_registry(session)
-        supersedes = (
-            await session.execute(
-                select(ExposureRow.id).where(ExposureRow.superseded_by_id == exposure.id)
-            )
-        ).scalar_one_or_none()
+        return await _detail(session, exposure_id)
+
+
+def _not_found() -> HTTPException:
+    return HTTPException(status_code=404, detail={"message": "exposure not found"})
+
+
+async def _detail(session: AsyncSession, exposure_id: str) -> ExposureDetail:
+    """The exposure as the workspace shows it, or 404."""
+    row = (
+        await session.execute(_with_submission().where(ExposureRow.id == exposure_id))
+    ).first()
+    if row is None:
+        raise _not_found()
+    exposure, app, submitted_at, submitted_by = row
+    loaded = await load_services(session, exposure.scan_id)
+    groups = await exposures.load_groups(session, exposure.id)
+    group_of = (await exposures.load_group_members(session, [exposure.id]))[exposure.id]
+    registry = await exposures.load_registry(session)
+    supersedes = (
+        await session.execute(
+            select(ExposureRow.id).where(ExposureRow.superseded_by_id == exposure.id)
+        )
+    ).scalar_one_or_none()
 
     assessment = exposures.assess(
         app_url=app.url,
@@ -172,6 +183,63 @@ async def get_exposure(exposure_id: str, request: Request) -> ExposureDetail:
         supersedes=supersedes,
         superseded_by=exposure.superseded_by_id,
     )
+
+
+def _conflict(exposure: ExposureRow, message: str) -> HTTPException:
+    """409, with what the console needs to reload: the current status and version."""
+    return HTTPException(
+        status_code=409,
+        detail={"message": message, "status": exposure.status, "version": exposure.version},
+    )
+
+
+@router.put("/exposures/{exposure_id}/groups", response_model=ExposureDetail)
+async def save_groups(exposure_id: str, body: SaveGroupingRequest, request: Request) -> ExposureDetail:
+    """Replace the grouping. Allowed while the exposure is grouping, planning
+    or awaiting confirmation; moves it to grouping, dropping any plan, and
+    increments its version. Refused with 409 when `version` is not the
+    current one, and with 422 and an error per service when the grouping
+    does not put each service that needs a VIP in exactly one group."""
+    async with _session_factory(request)() as session:
+        exposure = (
+            await session.execute(
+                select(ExposureRow).where(ExposureRow.id == exposure_id).with_for_update()
+            )
+        ).scalar_one_or_none()
+        if exposure is None:
+            raise _not_found()
+        if exposure.status not in [s.value for s in exposures.EDITABLE_STATUSES]:
+            raise _conflict(exposure, f"the grouping of a {exposure.status} exposure cannot change")
+        if body.version != exposure.version:
+            raise _conflict(
+                exposure,
+                f"the exposure is at version {exposure.version}; this grouping was made against version {body.version}",
+            )
+
+        app = await session.get(AppRow, exposure.app_id)
+        services = (await exposures.load_scan_services(session, [exposure.scan_id]))[exposure.scan_id]
+        assessment = exposures.assess(
+            app_url=app.url,
+            services=services,
+            found_by={},
+            group_of={},
+            registry=await exposures.load_registry(session),
+        )
+        groups = [group.service_ids for group in body.groups]
+        errors = exposures.validate_grouping(groups, services, assessment)
+        if errors:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "message": "each service that needs a VIP must be in exactly one group",
+                    "errors": [_notice(error).model_dump() for error in errors],
+                },
+            )
+        await exposures.save_grouping(
+            session, exposure, [(group.id, group.service_ids) for group in body.groups], _STUB_USER.username
+        )
+        await session.commit()
+        return await _detail(session, exposure_id)
 
 
 @router.get("/exposures/{exposure_id}/events")

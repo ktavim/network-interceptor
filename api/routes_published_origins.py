@@ -14,9 +14,10 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from core import exposures
 from core.db import PublishedOriginRow
 
-from .models import CreatePublishedOriginRequest, PublishedOrigin
+from .models import CreatePublishedOriginRequest, PatchPublishedOriginRequest, PublishedOrigin
 from .routes_me import _STUB_USER
 from .serialize import published_origin_to_schema
 
@@ -102,3 +103,29 @@ async def delete_published_origin(origin_id: str, request: Request) -> Response:
         row.removed_by = _STUB_USER.username
         await session.commit()
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.patch("/published-origins/{origin_id}", response_model=PublishedOrigin)
+async def patch_published_origin(
+    origin_id: str, body: PatchPublishedOriginRequest, request: Request
+) -> PublishedOrigin:
+    """Set the URL of the VIP that publishes an active entry's origin: the URL
+    the rewrite map of every app that calls it uses. An entry added by hand
+    has none, and blocks planning for those apps until it is set. Each open
+    exposure whose scan calls the origin records the change."""
+    factory = _session_factory(request)
+    async with factory() as session:
+        row = await session.get(PublishedOriginRow, origin_id)
+        if row is None or row.removed_at is not None:
+            raise HTTPException(status_code=404, detail={"message": "published origin not found"})
+        row.url = body.url
+        await exposures.notify_open_exposures(
+            session,
+            "registry_url_set",
+            _STUB_USER.username,
+            {"origin": exposures.format_origin(exposures.origin_of(row)), "url": body.url},
+            origin=exposures.origin_of(row),
+        )
+        await session.commit()
+        await session.refresh(row)
+    return published_origin_to_schema(row)

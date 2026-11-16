@@ -1,5 +1,6 @@
 from enum import Enum
 from typing import List, Optional
+from urllib.parse import urlsplit, urlunsplit
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -314,6 +315,65 @@ class ExposureDetail(ExposureSummary):
     # and the one of a later submission that replaced this one.
     supersedes: Optional[str] = None
     superseded_by: Optional[str] = None
+
+def _clean_url(value: str, schemes: tuple[str, ...]) -> str:
+    """A URL with one of `schemes` and a host, its scheme and host lowercased
+    and any trailing slash dropped, or ValueError."""
+    value = value.strip()
+    parts = urlsplit(value)
+    scheme = parts.scheme.lower()
+    if scheme not in schemes:
+        raise ValueError(f"the URL must start with {' or '.join(s + '://' for s in schemes)}")
+    if not parts.hostname:
+        raise ValueError("the URL must name a host")
+    if parts.username or parts.password or parts.query or parts.fragment:
+        raise ValueError("the URL must not carry credentials, a query or a fragment")
+    host = parts.hostname  # urlsplit lowercases it and drops IPv6 brackets
+    netloc = f"[{host}]" if ":" in host else host
+    if parts.port is not None:  # raises ValueError for a port out of range
+        netloc += f":{parts.port}"
+    return urlunsplit((scheme, netloc, parts.path.rstrip("/"), "", ""))
+
+
+class PatchAppRequest(BaseModel):
+    """The app's URL, which its own VIP is built from."""
+
+    url: str
+
+    @field_validator("url")
+    @classmethod
+    def _valid_url(cls, value: str) -> str:
+        return _clean_url(value, ("http", "https"))
+
+
+class PatchPublishedOriginRequest(BaseModel):
+    """The URL of the VIP that publishes a registry entry's origin. HTTPS
+    only: the app's own VIP serves HTTPS, and a browser blocks calls from it
+    to an http:// URL as mixed content."""
+
+    url: str
+
+    @field_validator("url")
+    @classmethod
+    def _valid_url(cls, value: str) -> str:
+        return _clean_url(value, ("https",))
+
+
+class GroupInput(BaseModel):
+    """One VIP group in a saved grouping. `id` keeps an existing group's id,
+    so a client's reference to it survives the save; leave it out for a new
+    group."""
+
+    id: Optional[str] = None
+    service_ids: List[str]
+
+
+class SaveGroupingRequest(BaseModel):
+    """The whole grouping, replacing the saved one. `version` is the version
+    the admin was looking at; a save against an older one is refused."""
+
+    version: int
+    groups: List[GroupInput]
 
 class CreateAppRequest(BaseModel):
     name: str

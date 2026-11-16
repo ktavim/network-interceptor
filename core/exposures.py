@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Iterable, Mapping, Optional, Sequence
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .db import (
@@ -436,3 +436,149 @@ async def create_for_submission(
             session, open_exposure.id, "exposure_superseded", submitted_by, {"by": exposure.id}
         )
     return exposure
+
+
+# The statuses whose grouping an admin may change. A change in `planning` or
+# `awaiting_confirmation` drops the plan: the exposure goes back to grouping.
+EDITABLE_STATUSES = (
+    ExposureStatus.grouping,
+    ExposureStatus.planning,
+    ExposureStatus.awaiting_confirmation,
+)
+
+
+def validate_grouping(
+    groups: Sequence[Sequence[str]], services: Sequence[ServiceRow], assessment: Assessment
+) -> list[Notice]:
+    """What is wrong with a grouping, one notice per service: each service
+    that needs a VIP must be in exactly one group, and no other may be in any.
+    Empty when it can be saved."""
+    by_id = {service.id: service for service in services}
+    errors: dict[str, Notice] = {}
+    seen: set[str] = set()
+    for group in groups:
+        for service_id in group:
+            if service_id in errors:
+                continue
+            service = by_id.get(service_id)
+            if service is None:
+                errors[service_id] = Notice(
+                    "unknown_service",
+                    f"{service_id} is not a service of this exposure's scan.",
+                    service_id,
+                )
+                continue
+            origin = format_origin(origin_of(service))
+            scope = assessment.services[service_id].scope
+            if scope is not ExposureScope.needs_vip:
+                errors[service_id] = Notice(
+                    "not_in_scope", f"{origin} does not need a VIP ({scope.value}).", service_id
+                )
+            elif service_id in seen:
+                errors[service_id] = Notice(
+                    "duplicate", f"{origin} is in more than one group.", service_id
+                )
+            seen.add(service_id)
+    for service in services:
+        if (
+            assessment.services[service.id].scope is ExposureScope.needs_vip
+            and service.id not in seen
+            and service.id not in errors
+        ):
+            errors[service.id] = Notice(
+                "service_ungrouped",
+                f"{format_origin(origin_of(service))} is not in a group.",
+                service.id,
+            )
+    return list(errors.values())
+
+
+async def save_grouping(
+    session: AsyncSession,
+    exposure: ExposureRow,
+    groups: Sequence[tuple[Optional[str], Sequence[str]]],
+    actor: str,
+) -> None:
+    """Replace the exposure's grouping with `groups`, each (group id or None,
+    service ids), already validated. Empty groups are dropped. A group keeps
+    its id when it names one of this exposure's groups, so the console's
+    selection survives a save; any other gets a new one. Increments the
+    version and moves the exposure to `grouping`, in the caller's
+    transaction, with the event that records it."""
+    existing = {
+        group_id
+        for group_id in (
+            await session.execute(
+                select(ExposureGroupRow.id).where(ExposureGroupRow.exposure_id == exposure.id)
+            )
+        ).scalars()
+    }
+    await session.execute(
+        delete(ExposureGroupMemberRow).where(ExposureGroupMemberRow.exposure_id == exposure.id)
+    )
+    await session.execute(delete(ExposureGroupRow).where(ExposureGroupRow.exposure_id == exposure.id))
+
+    kept: list[tuple[str, Sequence[str]]] = []
+    used: set[str] = set()
+    for group_id, service_ids in groups:
+        if not service_ids:
+            continue
+        if group_id not in existing or group_id in used:
+            group_id = "grp_" + uuid.uuid4().hex[:10]
+        used.add(group_id)
+        kept.append((group_id, service_ids))
+    session.add_all(
+        ExposureGroupRow(id=group_id, exposure_id=exposure.id, position=position)
+        for position, (group_id, _) in enumerate(kept)
+    )
+    # The groups first: no relationship tells the flush that members need them.
+    await session.flush()
+    session.add_all(
+        ExposureGroupMemberRow(exposure_id=exposure.id, service_id=service_id, group_id=group_id)
+        for group_id, service_ids in kept
+        for service_id in service_ids
+    )
+
+    previous = exposure.status
+    exposure.version += 1
+    exposure.status = ExposureStatus.grouping.value
+    payload: dict[str, Any] = {"version": exposure.version, "groups": len(kept)}
+    if previous != ExposureStatus.grouping.value:
+        # The plan for the old grouping is dropped; the agent's result for it,
+        # naming the old version, will be ignored.
+        payload["from_status"] = previous
+    await emit_exposure_event(session, exposure.id, "grouping_saved", actor, payload)
+    await session.flush()
+
+
+async def notify_open_exposures(
+    session: AsyncSession,
+    event_type: str,
+    actor: str,
+    payload: dict[str, Any],
+    *,
+    app_id: Optional[str] = None,
+    origin: Optional[Origin] = None,
+) -> list[str]:
+    """Record an event on every open exposure it concerns: the app's, or each
+    one whose scan has a service on `origin`. A change outside the exposure,
+    to the app or the registry, can change what blocks planning, so the
+    workspaces following those exposures reload. Returns their ids."""
+    stmt = select(ExposureRow.id).where(
+        ExposureRow.status.not_in([s.value for s in CLOSED_EXPOSURE_STATUSES])
+    )
+    if app_id is not None:
+        stmt = stmt.where(ExposureRow.app_id == app_id)
+    if origin is not None:
+        scheme, host, port = origin
+        stmt = stmt.where(
+            ExposureRow.scan_id.in_(
+                select(ServiceRow.scan_id).where(
+                    ServiceRow.scheme == scheme, ServiceRow.host == host, ServiceRow.port == port
+                )
+            )
+        )
+    ids = list((await session.execute(stmt.order_by(ExposureRow.id))).scalars())
+    for exposure_id in ids:
+        await emit_exposure_event(session, exposure_id, event_type, actor, payload)
+    return ids

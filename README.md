@@ -100,6 +100,7 @@ All under `/api`, except `/health`.
 | Method | Path | Does |
 |---|---|---|
 | `GET`, `POST` | `/apps` | List the apps; create one (`name`, `url`, `owner_ad_group`) |
+| `PATCH` | `/apps/{id}` | Set the app's `url`, which its exposure's VIP is built from |
 | `GET` | `/apps/{id}/scans` | The app's scans |
 | `GET` | `/apps/{id}/diff?from=&to=` | What changed between two of the app's scans |
 | `POST` | `/scans` | Start a scan (`app_id`, optional `max_depth`); returns `scan_id` |
@@ -114,8 +115,10 @@ All under `/api`, except `/health`.
 | `GET` | `/notifications` | Server-sent event stream across all scans |
 | `GET`, `POST` | `/published-origins` | Origins already published through the F5 (`?include_removed=true` adds removed ones); register one (`scheme`, `host`, `port`, `note`) |
 | `DELETE` | `/published-origins/{id}` | Remove a registration. Scans completed while it was active keep their verdicts |
+| `PATCH` | `/published-origins/{id}` | Set the `url` (HTTPS) of the VIP that publishes the origin, which apps that call it are rewritten to |
 | `GET` | `/exposures` | The exposure queue: open exposures, oldest submission first. `?status=` (repeatable) lists those statuses instead, newest first |
 | `GET` | `/exposures/{id}` | One exposure: its groups, every service of its scan with its `scope`, `warnings` and registry entry, and `blocked_by`, what blocks planning |
+| `PUT` | `/exposures/{id}/groups` | Replace the grouping (`version`, `groups`: each `service_ids` and, to keep an existing group, its `id`). 409 with the current `status` and `version` when the version is stale or the exposure is past confirmation; 422 with an error per service unless each service that needs a VIP is in exactly one group |
 | `GET` | `/exposures/{id}/events` | The exposure's event log as a server-sent event stream: each event's `type`, `actor`, `ts` and `payload`. Resumes from `Last-Event-ID`; a closed exposure's stream replays and ends |
 | `GET` | `/me` | The current user. A stub: there is no real auth flow. |
 | `GET` | `/health` | `{"status": "ok"}` |

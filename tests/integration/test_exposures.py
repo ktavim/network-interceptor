@@ -10,7 +10,10 @@ import pytest
 from fastapi import HTTPException
 from sqlalchemy import select, update
 
-from api.routes_exposures import exposure_events, get_exposure, list_exposures
+from api.models import GroupInput, PatchAppRequest, PatchPublishedOriginRequest, SaveGroupingRequest
+from api.routes_apps import patch_app
+from api.routes_exposures import exposure_events, get_exposure, list_exposures, save_groups
+from api.routes_published_origins import patch_published_origin
 from api.routes_scans import submit_scan
 from api.sse import EventBus
 from core.db import (
@@ -343,3 +346,141 @@ class TestEventStream:
         finally:
             runner.cancel()
             await asyncio.gather(runner, return_exceptions=True)
+
+
+def _ids_by_host(detail) -> dict[str, str]:
+    return {f"{s.host}:{s.port}": s.id for s in detail.services}
+
+
+async def _save(factory, exposure_id, version, groups):
+    """Save `groups`, each a list of service ids or (group id, service ids)."""
+    body = SaveGroupingRequest(version=version, groups=[
+        GroupInput(id=g[0], service_ids=g[1]) if isinstance(g, tuple) else GroupInput(service_ids=g)
+        for g in groups
+    ])
+    return await save_groups(exposure_id, body, _request(factory))
+
+
+async def _refused(call) -> HTTPException:
+    with pytest.raises(HTTPException) as e:
+        await call
+    return e.value
+
+
+class TestSaveGrouping:
+    async def test_saving_replaces_the_grouping_and_bumps_the_version(self, factory):
+        _, _, exposure = await _submitted(factory, [svc("a"), svc("b"), svc("c")])
+        before = await _detail(factory, exposure.id)
+        ids = _ids_by_host(before)
+        a_group = next(g.id for g in before.groups if ids["a:443"] in g.service_ids)
+        after = await _save(factory, exposure.id, 1, [
+            (a_group, [ids["a:443"], ids["b:443"]]), [], [ids["c:443"]],
+        ])
+        assert (after.version, after.status, after.blocked_by) == (2, "grouping", [])
+        assert [_hosts(after, g) for g in after.groups] == [["a:443", "b:443"], ["c:443"]]
+        # The group named by id keeps it; the new one gets its own; the empty one is dropped.
+        assert after.groups[0].id == a_group and after.groups[1].id not in {g.id for g in before.groups}
+        assert (await _events(factory, exposure.id))[-1] == (
+            "grouping_saved", "jchen", {"version": 2, "groups": 2},
+        )
+
+    async def test_a_save_against_an_older_version_is_409_with_the_current_one(self, factory):
+        _, _, exposure = await _submitted(factory, [svc("a")])
+        ids = _ids_by_host(await _detail(factory, exposure.id))
+        await _save(factory, exposure.id, 1, [[ids["a:443"]]])
+        error = await _refused(_save(factory, exposure.id, 1, [[ids["a:443"]]]))
+        assert error.status_code == 409
+        assert (error.detail["status"], error.detail["version"]) == ("grouping", 2)
+
+    async def test_a_closed_exposure_cannot_be_regrouped(self, factory):
+        app_id, _, old = await _submitted(factory, [svc("a")])
+        ids = _ids_by_host(await _detail(factory, old.id))
+        _, scan_id = await _scan(factory, [svc("a")], app_id=app_id)
+        await submit_scan(scan_id, _request(factory))
+        error = await _refused(_save(factory, old.id, 1, [[ids["a:443"]]]))
+        assert (error.status_code, error.detail["status"]) == (409, "superseded")
+
+    async def test_an_invalid_grouping_is_422_with_an_error_per_service(self, factory):
+        _, _, exposure = await _submitted(factory, [
+            svc("a"), svc("b"), svc("c"), svc("x", excluded=True, severity="blocker", auth="ntlm"),
+        ])
+        ids = _ids_by_host(await _detail(factory, exposure.id))
+        error = await _refused(_save(factory, exposure.id, 1, [
+            [ids["a:443"], ids["x:443"]], [ids["a:443"], "svc_nope"],
+        ]))
+        assert error.status_code == 422
+        assert sorted((e["code"], e["service_id"]) for e in error.detail["errors"]) == sorted([
+            ("not_in_scope", ids["x:443"]),
+            ("duplicate", ids["a:443"]),
+            ("unknown_service", "svc_nope"),
+            ("service_ungrouped", ids["b:443"]),
+            ("service_ungrouped", ids["c:443"]),
+        ])
+        assert (await _detail(factory, exposure.id)).version == 1
+
+    async def test_saving_a_planned_exposure_drops_the_plan(self, factory):
+        _, _, exposure = await _submitted(factory, [svc("a")])
+        ids = _ids_by_host(await _detail(factory, exposure.id))
+        async with factory() as session:
+            await session.execute(
+                update(ExposureRow).where(ExposureRow.id == exposure.id).values(status="awaiting_confirmation")
+            )
+            await session.commit()
+        after = await _save(factory, exposure.id, 1, [[ids["a:443"]]])
+        assert (after.status, after.version) == ("grouping", 2)
+        assert (await _events(factory, exposure.id))[-1][2] == {
+            "version": 2, "groups": 1, "from_status": "awaiting_confirmation",
+        }
+
+    async def test_unknown_exposure_is_404(self, factory):
+        error = await _refused(_save(factory, "exp_nope", 1, []))
+        assert error.status_code == 404
+
+
+class TestFixingBlockers:
+    async def test_setting_the_app_url_clears_its_blocker(self, factory):
+        app_id, _, exposure = await _submitted(factory, [svc("a")], app_url=None)
+        assert [n.code for n in (await _detail(factory, exposure.id)).blocked_by] == ["app_url_missing"]
+        app = await patch_app(app_id, PatchAppRequest(url="https://Payroll.corp.internal/"), _request(factory))
+        assert app.url == "https://payroll.corp.internal"
+        detail = await _detail(factory, exposure.id)
+        assert (detail.blocked_by, detail.app.url) == ([], "https://payroll.corp.internal")
+        assert (await _events(factory, exposure.id))[-1] == (
+            "app_url_set", "jchen", {"url": "https://payroll.corp.internal"},
+        )
+
+    async def test_an_unknown_app_is_404(self, factory):
+        error = await _refused(patch_app("app_nope", PatchAppRequest(url="https://x"), _request(factory)))
+        assert error.status_code == 404
+
+    async def test_setting_a_registry_url_clears_the_blocker_on_every_exposure_that_calls_it(self, factory):
+        entry = await _register(factory, "p")
+        published = dict(severity="published", auth="ntlm", published_origin_id=entry)
+        _, _, first = await _submitted(factory, [svc("a"), svc("p", **published)])
+        _, _, second = await _submitted(factory, [svc("p", **published)])
+        _, _, unrelated = await _submitted(factory, [svc("a")])
+        assert [n.code for n in (await _detail(factory, first.id)).blocked_by] == ["published_url_missing"]
+
+        result = await patch_published_origin(
+            entry, PatchPublishedOriginRequest(url="https://p.example.com"), _request(factory)
+        )
+        assert result.url == "https://p.example.com"
+        for exposure in (first, second):
+            assert (await _detail(factory, exposure.id)).blocked_by == []
+            assert (await _events(factory, exposure.id))[-1] == (
+                "registry_url_set", "jchen", {"origin": "https://p", "url": "https://p.example.com"},
+            )
+        assert [t for t, *_ in await _events(factory, unrelated.id)] == ["exposure_created"]
+
+    async def test_a_removed_registry_entry_is_404(self, factory):
+        entry = await _register(factory, "p")
+        async with factory() as session:
+            await session.execute(
+                update(PublishedOriginRow).where(PublishedOriginRow.id == entry)
+                .values(removed_at=PublishedOriginRow.added_at, removed_by="test")
+            )
+            await session.commit()
+        error = await _refused(
+            patch_published_origin(entry, PatchPublishedOriginRequest(url="https://p.example.com"), _request(factory))
+        )
+        assert error.status_code == 404

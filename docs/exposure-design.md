@@ -180,7 +180,7 @@ Every endpoint here requires the `admin` role (see Identity). Errors follow the 
 |---|---|---|
 | `GET` | `/api/exposures` | The queue: open exposures, oldest submission first. `?status=` selects others, for the history |
 | `GET` | `/api/exposures/{id}` | The workspace: status, version, app, scan, the services in scope with their groups, the `published` and excluded ones, warnings, what blocks planning, the current plan, who confirmed it, the failed step |
-| `PUT` | `/api/exposures/{id}/groups` | Replace the grouping. Body: the version and the groups, each a list of service IDs. Allowed in `grouping`, `planning` and `awaiting_confirmation`; moves the exposure to `grouping` and increments its version. A grouping that does not put each in-scope service in exactly one group is refused with an error per service |
+| `PUT` | `/api/exposures/{id}/groups` | Replace the grouping. Body: the version and the groups, each a list of service IDs and, to keep an existing group's ID, that ID; empty groups are dropped. Allowed in `grouping`, `planning` and `awaiting_confirmation`; moves the exposure to `grouping` and increments its version. A grouping that does not put each in-scope service in exactly one group is refused with an error per service |
 | `POST` | `/api/exposures/{id}/plan` | Request a plan. Body: the version. `grouping` to `planning`; refused, with the reasons, while anything blocks planning |
 | `POST` | `/api/exposures/{id}/confirm` | Approve the plan. Body: the version and the plan's hash. `awaiting_confirmation` to `deploying`; records who confirmed. Refused if the hash is not the current plan's |
 | `POST` | `/api/exposures/{id}/retry` | Body: the version. `failed` to `planning` or `deploying`, resuming from the failed step |
