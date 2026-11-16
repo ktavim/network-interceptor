@@ -54,10 +54,10 @@ class TestRequestPlan:
         assert (await _events(factory, exposure.id))[-1] == ("plan_requested", "jchen", {"version": 1})
 
     async def test_refused_with_the_reasons_while_blocked(self, factory):
-        _, _, exposure = await _submitted(factory, [svc("a")], app_url=None)
+        _, _, exposure = await _submitted(factory, [svc("a", auth="kerberos")])
         error = await _refused(_plan(factory, exposure.id))
         assert error.status_code == 409
-        assert [n["code"] for n in error.detail["blocked_by"]] == ["app_url_missing"]
+        assert [n["code"] for n in error.detail["blocked_by"]] == ["kerberos_unsupported"]
         assert (await _detail(factory, exposure.id)).status == "grouping"
 
     async def test_refused_for_a_stale_version(self, factory):

@@ -57,12 +57,10 @@ def plan_hash(plan: dict[str, Any]) -> str:
 
 async def assess_exposure(session: AsyncSession, exposure: ExposureRow) -> exposures.Assessment:
     """The exposure's scope and what blocks planning, as it stands now."""
-    app = await session.get(AppRow, exposure.app_id)
     services = (await exposures.load_scan_services(session, [exposure.scan_id]))[exposure.scan_id]
     group_of = (await exposures.load_group_members(session, [exposure.id]))[exposure.id]
     deploying = (await exposures.load_deploying(session, [exposure.app_id]))[exposure.app_id]
     return exposures.assess(
-        app_url=app.url,
         services=services,
         found_by={},
         group_of=group_of,
@@ -359,7 +357,7 @@ async def _register_origins(
     publishing = [(exposures.origin_of(service), url_of[service.id], False) for service in services]
     app = await session.get(AppRow, exposure.app_id)
     public_url = plan.get("app", {}).get("public_url")
-    if app.url and public_url:
+    if public_url:
         publishing.append((_origin_of_url(app.url), public_url, True))
 
     registry = await exposures.load_registry(session)

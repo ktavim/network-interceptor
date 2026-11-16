@@ -407,17 +407,6 @@ def _clean_url(value: str, schemes: tuple[str, ...]) -> str:
     return urlunsplit((scheme, netloc, parts.path.rstrip("/"), "", ""))
 
 
-class PatchAppRequest(BaseModel):
-    """The app's URL, which its own VIP is built from."""
-
-    url: str
-
-    @field_validator("url")
-    @classmethod
-    def _valid_url(cls, value: str) -> str:
-        return _clean_url(value, ("http", "https"))
-
-
 class PatchPublishedOriginRequest(BaseModel):
     """The URL of the VIP that publishes a registry entry's origin. HTTPS
     only: the app's own VIP serves HTTPS, and a browser blocks calls from it
@@ -449,8 +438,27 @@ class SaveGroupingRequest(BaseModel):
 
 class CreateAppRequest(BaseModel):
     name: str
+    # Where the app is reached: its scans start here, and its exposure's VIP
+    # is built from it. Kept as given, path, query and fragment included,
+    # since a scan may need to start on a particular page.
     url: str
     owner_ad_group: str
+
+    @field_validator("url")
+    @classmethod
+    def _valid_url(cls, value: str) -> str:
+        """http or https, a host, a valid port, no credentials: what a scan
+        and the app's VIP need. Refused here rather than at deploy."""
+        value = value.strip()
+        parts = urlsplit(value)
+        if parts.scheme.lower() not in ("http", "https"):
+            raise ValueError("the URL must start with http:// or https://")
+        if not parts.hostname:
+            raise ValueError("the URL must name a host")
+        if parts.username or parts.password:
+            raise ValueError("the URL must not carry credentials")
+        parts.port  # raises ValueError for a port out of range
+        return value
 
 
 _ORIGIN_SCHEMES = ("http", "https")

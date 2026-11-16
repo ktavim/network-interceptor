@@ -102,7 +102,6 @@ async def list_exposures(
         # The queue shows no warnings, so the scanners that found each
         # service are not needed.
         assessment = exposures.assess(
-            app_url=app.url,
             services=services[exposure.scan_id],
             found_by={},
             group_of=members[exposure.id],
@@ -143,7 +142,6 @@ async def _detail(session: AsyncSession, exposure_id: str) -> ExposureDetail:
     ).scalar_one_or_none()
 
     assessment = exposures.assess(
-        app_url=app.url,
         services=[service for service, *_ in loaded],
         found_by={
             service.id: [finding.scanner for finding, _ in findings]
@@ -237,10 +235,8 @@ async def save_groups(exposure_id: str, body: SaveGroupingRequest, request: Requ
                 f"the exposure is at version {exposure.version}; this grouping was made against version {body.version}",
             )
 
-        app = await session.get(AppRow, exposure.app_id)
         services = (await exposures.load_scan_services(session, [exposure.scan_id]))[exposure.scan_id]
         assessment = exposures.assess(
-            app_url=app.url,
             services=services,
             found_by={},
             group_of={},

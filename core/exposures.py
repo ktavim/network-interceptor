@@ -138,7 +138,6 @@ def _warnings(service: ServiceRow, found_by: Iterable[str]) -> tuple[Notice, ...
 
 def assess(
     *,
-    app_url: Optional[str],
     services: Sequence[ServiceRow],
     found_by: Mapping[str, Iterable[str]],
     group_of: Mapping[str, str],
@@ -155,8 +154,6 @@ def assess(
     the registry entry its published_origin_id points at.
     """
     out = Assessment()
-    if not app_url:
-        out.blocked_by.append(Notice("app_url_missing", "The app has no URL; set one to plan its VIP."))
     for exposure_id in deploying:
         # Its origins reach the registry when it has deployed; planning before
         # then would plan them a second time.

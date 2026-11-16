@@ -10,8 +10,7 @@ import pytest
 from fastapi import HTTPException
 from sqlalchemy import select, update
 
-from api.models import GroupInput, PatchAppRequest, PatchPublishedOriginRequest, SaveGroupingRequest
-from api.routes_apps import patch_app
+from api.models import GroupInput, PatchPublishedOriginRequest, SaveGroupingRequest
 from api.routes_exposures import exposure_events, get_exposure, list_exposures, save_groups
 from api.routes_published_origins import patch_published_origin
 from api.routes_scans import submit_scan
@@ -186,7 +185,7 @@ class TestSupersede:
 class TestQueue:
     async def test_open_exposures_oldest_submission_first(self, factory):
         _, _, first = await _submitted(factory, [svc("a"), svc("b")])
-        _, _, second = await _submitted(factory, [svc("c")], app_url=None)
+        _, _, second = await _submitted(factory, [svc("c", auth="kerberos")])
         queue = await _queue(factory)
         assert [(e.id, e.needs_vip_count, e.blocked) for e in queue] == [
             (first.id, 2, False), (second.id, 1, True),
@@ -427,21 +426,6 @@ class TestSaveGrouping:
 
 
 class TestFixingBlockers:
-    async def test_setting_the_app_url_clears_its_blocker(self, factory):
-        app_id, _, exposure = await _submitted(factory, [svc("a")], app_url=None)
-        assert [n.code for n in (await _detail(factory, exposure.id)).blocked_by] == ["app_url_missing"]
-        app = await patch_app(app_id, PatchAppRequest(url="https://Payroll.corp.internal/"), _request(factory))
-        assert app.url == "https://payroll.corp.internal"
-        detail = await _detail(factory, exposure.id)
-        assert (detail.blocked_by, detail.app.url) == ([], "https://payroll.corp.internal")
-        assert (await _events(factory, exposure.id))[-1] == (
-            "app_url_set", "jchen", {"url": "https://payroll.corp.internal"},
-        )
-
-    async def test_an_unknown_app_is_404(self, factory):
-        error = await _refused(patch_app("app_nope", PatchAppRequest(url="https://x"), _request(factory)))
-        assert error.status_code == 404
-
     async def test_setting_a_registry_url_clears_the_blocker_on_every_exposure_that_calls_it(self, factory):
         entry = await _register(factory, "p")
         published = dict(severity="published", auth="ntlm", published_origin_id=entry)

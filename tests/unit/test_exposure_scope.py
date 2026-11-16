@@ -26,10 +26,8 @@ def _registry(*entries):
     return {(e.scheme, e.host, e.port): e for e in entries}
 
 
-def _assess(services, *, app_url="https://app.internal", found_by=None, group_of=None,
-            registry=(), scan_entries=None):
+def _assess(services, *, found_by=None, group_of=None, registry=(), scan_entries=None):
     return assess(
-        app_url=app_url,
         services=services,
         found_by=found_by if found_by is not None else {s.id: BOTH for s in services},
         group_of=group_of if group_of is not None else {s.id: "grp" for s in services},
@@ -79,9 +77,6 @@ class TestAssess:
         result = _assess([a])
         assert (result.blocked_by, result.needs_vip_count) == ([], 1)
         assert result.services[a.id].warnings == ()
-
-    def test_an_app_without_a_url(self):
-        assert _codes(_assess([_service("a")], app_url=None)) == [("app_url_missing", None)]
 
     def test_an_ungrouped_service(self):
         a, b = _service("a"), _service("b")

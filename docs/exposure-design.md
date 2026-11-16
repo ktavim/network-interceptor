@@ -54,7 +54,7 @@ The same applies to an app that signs its own users in with Kerberos, but the sc
 
 Each service already carries what its pool needs: `ips` and `port` are the pool members, and `scheme` says whether the F5 speaks HTTP or HTTPS to them. The VIP itself serves HTTPS whatever the scheme (see Grouping). Its `host` is only the name the app called it by; the VIP gets a new one (see DNS names).
 
-The exposure also covers the app itself. Outside browsers load it through its own VIP, built from the app's `url`, which is optional on an app today and must be set before its exposure can be planned. Like every VIP it serves HTTPS, even when the app's `url` is `http://`. That VIP is where the rewriting happens. The app's first exposure creates it; later ones update its rewrite map.
+The exposure also covers the app itself. Outside browsers load it through its own VIP, built from the app's `url`, which every app has: creating an app requires one, and checks that it is `http` or `https` with a host. Like every VIP it serves HTTPS, even when the app's `url` is `http://`. That VIP is where the rewriting happens. The app's first exposure creates it; later ones update its rewrite map.
 
 Each time a plan is requested, the backend re-reads the published-origins registry. A service whose origin was registered after the scan, for example by another app's exposure, is dropped from scope as published. This is what keeps two apps that call the same backend from getting two VIPs for it.
 
@@ -169,10 +169,10 @@ The workspace always shows the app, its `url`, the scan the exposure is pinned t
 
 - a service not in exactly one group;
 - an unexcluded Kerberos service (see Scope of an exposure);
-- the app has no `url`;
-- a `published` service whose registry entry has no URL (see Order of execution, step 6).
+- a `published` service whose registry entry has no URL (see Order of execution, step 6);
+- an earlier exposure of the app still deploying (see Lifecycle).
 
-The last two are fixed in the workspace itself, through the two non-exposure endpoints under Admin API.
+The registry URL is set in the workspace itself, through the one non-exposure endpoint under Admin API.
 
 **Warnings.** The backend attaches them to services; they do not block planning, and the confirm screen repeats them next to the confirm button:
 
@@ -199,7 +199,6 @@ Every endpoint here requires the `admin` role (see Identity). Errors follow the 
 | `POST` | `/api/exposures/{id}/retry` | Body: the version. `failed` to `planning` or `deploying`, resuming from the failed step |
 | `POST` | `/api/exposures/{id}/cancel` | Body: the version. To `cancelled` from `grouping` if never planned; otherwise to `cancelling` from `grouping`, `planning`, `awaiting_confirmation` or `failed`. Increments the version, so a plan in flight is dropped. Refused in `deploying` and `deployed` |
 | `GET` | `/api/exposures/{id}/events` | The exposure's event stream over SSE, resumable with `Last-Event-ID`, as a scan's is. Carries admin actions as well as the agent's steps; a closed exposure's stream replays and ends |
-| `PATCH` | `/api/apps/{id}` | Set the app's `url` |
 | `PATCH` | `/api/published-origins/{id}` | Set the URL of the VIP that publishes a registry entry added by hand |
 
 Requesting a plan, confirming, retrying and cancelling are each a status change the backend makes in one transaction with the event that records it, so the event log and the status never disagree.

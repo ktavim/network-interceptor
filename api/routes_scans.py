@@ -226,14 +226,7 @@ async def create_scan(body: CreateScanRequest, request: Request) -> CreateScanRe
         existing_app = await session.get(AppRow, body.app_id)
         if not existing_app:
             raise HTTPException(status_code=404, detail={"message": "app not found"})
-        # The scan always targets the app's own URL — it's no longer supplied per
-        # scan. Apps are created with a required URL, but guard for legacy rows
-        # that predate that rule so we never start a scrape without a start URL.
-        if not existing_app.url:
-            raise HTTPException(
-                status_code=422,
-                detail={"message": "app has no URL configured; cannot start a scan"},
-            )
+        # The scan always targets the app's own URL, which every app has.
         name = existing_app.name
         start_url = existing_app.url
         session.add(

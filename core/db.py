@@ -66,7 +66,9 @@ class AppRow(Base):
 
     id: Mapped[str] = mapped_column(String, primary_key=True)
     name: Mapped[str] = mapped_column(String, nullable=False)
-    url: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    # Where the app is reached, and where its scans start; its exposure's VIP
+    # is built from it too. Required, and checked when the app is created.
+    url: Mapped[str] = mapped_column(String, nullable=False)
     owner_ad_group: Mapped[str] = mapped_column(String, nullable=False, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     # Canonical "current version" — the scan that was most recently submitted for

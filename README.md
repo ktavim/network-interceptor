@@ -100,7 +100,6 @@ All under `/api`, except `/health`.
 | Method | Path | Does |
 |---|---|---|
 | `GET`, `POST` | `/apps` | List the apps; create one (`name`, `url`, `owner_ad_group`) |
-| `PATCH` | `/apps/{id}` | Set the app's `url`, which its exposure's VIP is built from |
 | `GET` | `/apps/{id}/scans` | The app's scans |
 | `GET` | `/apps/{id}/diff?from=&to=` | What changed between two of the app's scans |
 | `POST` | `/scans` | Start a scan (`app_id`, optional `max_depth`); returns `scan_id` |

@@ -14,7 +14,6 @@ from core.db import (
     load_services,
     unresolved_count,
 )
-from core import exposures
 from core.enums import AuthMethod, Severity
 
 from .models import (
@@ -22,13 +21,11 @@ from .models import (
     AuthMethodChange,
     CreateAppRequest,
     ExclusionChange,
-    PatchAppRequest,
     PublishedChange,
     ScanDiff,
     ScanSummary,
     Service,
 )
-from .routes_me import _STUB_USER
 from .serialize import app_to_summary, scan_to_summary, service_to_schema
 
 router = APIRouter()
@@ -115,25 +112,6 @@ async def create_app(body: CreateAppRequest, request: Request) -> AppSummary:
         await session.refresh(app)
 
     return app_to_summary(app, last_scan=None, last_scan_unresolved_count=0)
-
-
-@router.patch("/apps/{app_id}", response_model=AppSummary)
-async def patch_app(app_id: str, body: PatchAppRequest, request: Request) -> AppSummary:
-    """Set the app's URL. Its own VIP is built from it, so an app without one
-    cannot have its exposure planned. The app's open exposure records the
-    change, and the workspaces following it reload."""
-    factory = _session_factory(request)
-    async with factory() as session:
-        app = await session.get(AppRow, app_id)
-        if app is None:
-            raise HTTPException(status_code=404, detail={"message": "app not found"})
-        app.url = body.url
-        await exposures.notify_open_exposures(
-            session, "app_url_set", _STUB_USER.username, {"url": body.url}, app_id=app_id
-        )
-        await session.commit()
-        [summary] = await _app_summaries(session, app_id)
-        return summary
 
 
 @router.get("/apps/{app_id}/scans", response_model=List[ScanSummary])
