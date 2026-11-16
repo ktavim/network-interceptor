@@ -139,7 +139,7 @@ As built in phase 5:
 - AS3 declares a partition whole, so a later exposure of the same app keeps the VIPs the earlier ones deployed in its declaration, and re-renders only the app's VIP. That VIP keeps its address, certificate and DNS name, which the earlier exposure holds; the later plan creates only its services' names, so cancelling it cannot delete the app's.
 - Registering marks each entry with the exposure that registered it. That exposure reads its own entries as the services it publishes, so a deployed exposure still shows them as its own. An origin someone else registered between the plan and the deploy keeps its entry; the deployment lists it as already registered.
 - Registering also takes the newly published origins out of the groupings of the other open exposures (in `grouping`, `planning`, `awaiting_confirmation`, or `failed` while planning). Each one changed returns to `grouping` with a new version, dropping its plan, so no origin gets a second VIP. The app's newer exposure, blocked while this one deployed, is told it can now be planned.
-- Not decided yet: whether the app's own origin is registered too, for other apps that call it. Phase 5 registers only its services.
+- The app's own origin is registered too, at the app's public URL, so that another app that calls this one reaches it through its VIP rather than getting a VIP of its own for it. A later exposure of the app leaves that entry alone, since its app VIP is the same one.
 
 ## Console
 

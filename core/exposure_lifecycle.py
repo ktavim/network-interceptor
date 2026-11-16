@@ -14,6 +14,7 @@ import json
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Optional
+from urllib.parse import urlsplit
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -333,12 +334,19 @@ async def _register_origins(
     session: AsyncSession, exposure: ExposureRow
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[exposures.Origin]]:
     """Add each origin the confirmed plan published to the registry, as this
-    exposure's entry, with the URL of the VIP that publishes it. Returns what
-    was registered, what someone else registered since the plan, which keeps
-    its entry and the URL it has, and the origins registered."""
+    exposure's entry, with the URL of the VIP that publishes it: its
+    services', and the app's own, at the app's public URL, so that another
+    app that calls this one reaches it through its VIP rather than getting a
+    second one. Returns what was registered, what someone else registered
+    since the plan, which keeps its entry and the URL it has, and the origins
+    registered.
+
+    The app's origin is skipped when its entry already has the app's public
+    URL: an earlier exposure of the app registered it, with the same VIP."""
+    plan = exposure.plan or {}
     url_of = {
         s["service_id"]: s["url"]
-        for vip in (exposure.plan or {}).get("vips", [])
+        for vip in plan.get("vips", [])
         for s in vip.get("services", [])
     }
     services = (
@@ -348,26 +356,34 @@ async def _register_origins(
             .order_by(ServiceRow.host, ServiceRow.port, ServiceRow.scheme)
         )
     ).scalars()
+    publishing = [(exposures.origin_of(service), url_of[service.id], False) for service in services]
+    app = await session.get(AppRow, exposure.app_id)
+    public_url = plan.get("app", {}).get("public_url")
+    if app.url and public_url:
+        publishing.append((_origin_of_url(app.url), public_url, True))
+
     registry = await exposures.load_registry(session)
     registered, kept, origins = [], [], []
-    for service in services:
-        origin = exposures.origin_of(service)
-        item = {"origin": exposures.format_origin(origin), "url": url_of[service.id]}
+    for origin, url, is_app in publishing:
+        item = {"origin": exposures.format_origin(origin), "url": url}
         entry = registry.get(origin)
+        if entry is not None and is_app and entry.url == url:
+            continue
         if entry is not None and entry.exposure_id != exposure.id:
             kept.append({**item, "url": entry.url})
             continue
         if entry is None:
+            scheme, host, port = origin
             try:
                 async with session.begin_nested():
                     session.add(PublishedOriginRow(
                         id="pub_" + uuid.uuid4().hex[:10],
-                        scheme=service.scheme,
-                        host=service.host,
-                        port=service.port,
-                        note=f"VIP of exposure {exposure.id}",
+                        scheme=scheme,
+                        host=host,
+                        port=port,
+                        note=f"{'app VIP' if is_app else 'VIP'} of exposure {exposure.id}",
                         added_by=AGENT,
-                        url=item["url"],
+                        url=url,
                         exposure_id=exposure.id,
                     ))
             except IntegrityError:
@@ -377,3 +393,9 @@ async def _register_origins(
         registered.append(item)
         origins.append(origin)
     return registered, kept, origins
+
+
+def _origin_of_url(url: str) -> exposures.Origin:
+    """(scheme, host, port) of a URL, the port made explicit, as the services table keys an origin."""
+    parts = urlsplit(url)
+    return (parts.scheme, parts.hostname, parts.port or (443 if parts.scheme == "https" else 80))

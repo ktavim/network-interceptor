@@ -212,6 +212,7 @@ def _real_plan(detail) -> dict:
     https://<host>.example.com."""
     by_id = {s.id: s for s in detail.services}
     return {
+        "app": {"public_url": "https://payroll.example.com"},
         "summary": {"add": 3, "change": 0, "destroy": 0},
         "vips": [
             {
@@ -234,9 +235,15 @@ DEPLOYMENT = {
 }
 
 
-async def _deploying(factory, services, *, app_id=None):
-    """An exposure confirmed with a real-shaped plan: (app id, detail)."""
-    app_id, _, exposure = await _submitted(factory, services)
+async def _deploying(factory, services, *, app_id=None, app_url="https://app.internal"):
+    """An exposure confirmed with a real-shaped plan, of a new app unless
+    `app_id` names one: (app id, detail)."""
+    if app_id is None:
+        app_id, _, exposure = await _submitted(factory, services, app_url=app_url)
+    else:
+        _, scan_id = await _scan(factory, services, app_id=app_id)
+        await submit_scan(scan_id, _request(factory))
+        exposure = await _exposure_by_scan(factory, scan_id)
     await _plan(factory, exposure.id)
     detail = await _detail(factory, exposure.id)
     assert await _result(factory, exposure.id, 1, "planning", plan=_real_plan(detail))
@@ -274,11 +281,15 @@ class TestDeploy:
             "registered": [
                 {"origin": "https://a", "url": "https://a.example.com"},
                 {"origin": "https://b", "url": "https://b.example.com"},
+                # The app's own, for the apps that call it.
+                {"origin": "https://app.internal", "url": "https://payroll.example.com"},
             ],
             "already_registered": [],
         }
         assert await _registry(factory) == [
-            ("a", "https://a.example.com", detail.id), ("b", "https://b.example.com", detail.id),
+            ("a", "https://a.example.com", detail.id),
+            ("app.internal", "https://payroll.example.com", detail.id),
+            ("b", "https://b.example.com", detail.id),
         ]
         # Its own entries do not make its services published.
         assert {s.scope for s in deployed.services} == {"needs_vip"}
@@ -292,11 +303,15 @@ class TestDeploy:
         await _register(factory, "a", url="https://by-hand.example.com")
         assert await _result(factory, detail.id, 1, "deploying", deployment=DEPLOYMENT)
         deployed = await _detail(factory, detail.id)
-        assert deployed.deployment["registered"] == []
+        assert deployed.deployment["registered"] == [
+            {"origin": "https://app.internal", "url": "https://payroll.example.com"},
+        ]
         assert deployed.deployment["already_registered"] == [
             {"origin": "https://a", "url": "https://by-hand.example.com"},
         ]
-        assert await _registry(factory) == [("a", "https://by-hand.example.com", None)]
+        assert await _registry(factory) == [
+            ("a", "https://by-hand.example.com", None), ("app.internal", "https://payroll.example.com", detail.id),
+        ]
 
     async def test_the_newer_submission_is_unblocked_and_loses_what_was_published(self, factory):
         app_id, old = await _deploying(factory, [svc("a"), svc("b")])
@@ -337,6 +352,27 @@ class TestDeploy:
         })
         # The agent's plan for the old version is dropped when it arrives.
         assert not await _result(factory, other.id, 1, "planning", plan=PLAN)
+
+    async def test_another_app_that_calls_this_one_gets_its_vip(self, factory):
+        _, caller = await _planned(factory, [svc("payroll.internal"), svc("d")])
+        _, payroll = await _deploying(factory, [svc("a")], app_url="https://payroll.internal")
+        assert await _result(factory, payroll.id, 1, "deploying", deployment=DEPLOYMENT)
+        after = await _detail(factory, caller.id)
+        by_host = {s.host: s for s in after.services}
+        assert (by_host["payroll.internal"].scope, by_host["payroll.internal"].registry_entry.url) == (
+            "published", "https://payroll.example.com",
+        )
+        assert (after.status, [g.service_ids for g in after.groups]) == ("grouping", [[by_host["d"].id]])
+
+    async def test_a_later_exposure_of_the_app_leaves_its_entry_alone(self, factory):
+        app_id, first = await _deploying(factory, [svc("a")])
+        assert await _result(factory, first.id, 1, "deploying", deployment=DEPLOYMENT)
+        _, second = await _deploying(factory, [svc("a"), svc("c")], app_id=app_id)
+        assert await _result(factory, second.id, 1, "deploying", deployment=DEPLOYMENT)
+        deployed = await _detail(factory, second.id)
+        assert deployed.deployment["registered"] == [{"origin": "https://c", "url": "https://c.example.com"}]
+        assert deployed.deployment["already_registered"] == []
+        assert ("app.internal", "https://payroll.example.com", first.id) in await _registry(factory)
 
     async def test_a_failed_deploy_retries_then_cancels(self, factory):
         _, detail = await _deploying(factory, [svc("a")])
