@@ -1,6 +1,8 @@
 """Exposures: created on submit, superseded by the next submission, and read
 by the console's queue, history and workspace endpoints. Against a real
 Postgres. Set TEST_DATABASE_URL to run."""
+import asyncio
+import json
 import uuid
 from types import SimpleNamespace
 
@@ -8,8 +10,9 @@ import pytest
 from fastapi import HTTPException
 from sqlalchemy import select, update
 
-from api.routes_exposures import get_exposure, list_exposures
+from api.routes_exposures import exposure_events, get_exposure, list_exposures
 from api.routes_scans import submit_scan
+from api.sse import EventBus
 from core.db import (
     AppRow,
     ExposureEventRow,
@@ -21,6 +24,7 @@ from core.db import (
     ServiceRow,
 )
 from core.enums import ExposureStatus
+from core.exposures import emit_exposure_event
 
 BOTH = ("interceptor", "tracer")
 
@@ -263,3 +267,79 @@ class TestWorkspace:
         [p] = detail.services
         assert (p.scope, p.registry_entry.id) == ("unresolved", entry)
         assert [n.code for n in detail.blocked_by] == ["published_origin_removed"]
+
+
+def _stream_request(factory, bus=None, **headers) -> SimpleNamespace:
+    async def is_disconnected():
+        return False
+
+    state = SimpleNamespace(session_factory=factory, event_bus=bus or EventBus(factory))
+    return SimpleNamespace(app=SimpleNamespace(state=state), headers=headers, is_disconnected=is_disconnected)
+
+
+async def _stream(factory, exposure_id, **headers) -> list[dict]:
+    """The events GET /exposures/{id}/events sends before it closes the stream."""
+    response = await exposure_events(exposure_id, _stream_request(factory, **headers))
+    async with asyncio.timeout(5):
+        return [json.loads(event["data"]) async for event in response.body_iterator if "data" in event]
+
+
+async def _emit(factory, exposure_id, event_type, actor="mlevi", payload=None) -> None:
+    async with factory() as session:
+        await emit_exposure_event(session, exposure_id, event_type, actor, payload)
+        await session.commit()
+
+
+class TestEventStream:
+    async def test_a_closed_exposure_replays_and_ends(self, factory):
+        app_id, _, old = await _submitted(factory, [svc("a")])
+        _, scan_id = await _scan(factory, [svc("a")], app_id=app_id)
+        await submit_scan(scan_id, _request(factory))
+        events = await _stream(factory, old.id)
+        assert [(e["type"], e["actor"], e["seq"]) for e in events] == [
+            ("exposure_created", "jchen", "0"), ("exposure_superseded", "jchen", "1"),
+        ]
+        assert events[0]["exposure_id"] == old.id and events[0]["ts"] > 0
+
+    async def test_it_resumes_after_last_event_id(self, factory):
+        app_id, _, old = await _submitted(factory, [svc("a")])
+        _, scan_id = await _scan(factory, [svc("a")], app_id=app_id)
+        await submit_scan(scan_id, _request(factory))
+        assert [e["type"] for e in await _stream(factory, old.id, **{"Last-Event-ID": "0"})] == [
+            "exposure_superseded"
+        ]
+
+    async def test_an_unknown_exposure_is_404(self, factory):
+        with pytest.raises(HTTPException) as e:
+            await exposure_events("exp_nope", _stream_request(factory))
+        assert e.value.status_code == 404
+
+    async def test_an_open_exposure_streams_new_events_as_they_commit(self, factory, migrated_db, monkeypatch):
+        # The bus LISTENs on the database DATABASE_URL names.
+        monkeypatch.setenv("DATABASE_URL", migrated_db)
+        _, _, exposure = await _submitted(factory, [svc("a")])
+        bus = EventBus(factory)
+        listening = asyncio.Event()
+        wake_all = bus._wake_all
+        # Called once LISTEN is in place.
+        monkeypatch.setattr(bus, "_wake_all", lambda: (wake_all(), listening.set()))
+        runner = asyncio.create_task(bus.run())
+        try:
+            async with asyncio.timeout(10):
+                await listening.wait()
+            response = await exposure_events(exposure.id, _stream_request(factory, bus))
+            events = response.body_iterator
+            async with asyncio.timeout(5):
+                assert json.loads((await anext(events))["data"])["type"] == "exposure_created"
+                await _emit(factory, exposure.id, "grouping_saved", payload={"version": 2})
+                # Sooner than the stream's 15 s keepalive: the NOTIFY woke it.
+                saved = json.loads((await anext(events))["data"])
+                assert (saved["type"], saved["actor"], saved["payload"]) == ("grouping_saved", "mlevi", {"version": 2})
+                await _emit(factory, exposure.id, "exposure_cancelled")
+                assert json.loads((await anext(events))["data"])["type"] == "exposure_cancelled"
+                # The event that closes the exposure ends its stream.
+                with pytest.raises(StopAsyncIteration):
+                    await anext(events)
+        finally:
+            runner.cancel()
+            await asyncio.gather(runner, return_exceptions=True)

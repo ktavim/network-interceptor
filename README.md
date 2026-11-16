@@ -116,6 +116,7 @@ All under `/api`, except `/health`.
 | `DELETE` | `/published-origins/{id}` | Remove a registration. Scans completed while it was active keep their verdicts |
 | `GET` | `/exposures` | The exposure queue: open exposures, oldest submission first. `?status=` (repeatable) lists those statuses instead, newest first |
 | `GET` | `/exposures/{id}` | One exposure: its groups, every service of its scan with its `scope`, `warnings` and registry entry, and `blocked_by`, what blocks planning |
+| `GET` | `/exposures/{id}/events` | The exposure's event log as a server-sent event stream: each event's `type`, `actor`, `ts` and `payload`. Resumes from `Last-Event-ID`; a closed exposure's stream replays and ends |
 | `GET` | `/me` | The current user. A stub: there is no real auth flow. |
 | `GET` | `/health` | `{"status": "ok"}` |
 

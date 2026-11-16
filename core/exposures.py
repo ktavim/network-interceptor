@@ -39,6 +39,11 @@ Origin = tuple[str, str, int]
 
 _DEFAULT_PORTS = {"http": 80, "https": 443}
 
+# The NOTIFY channel that wakes exposure event streams (api.sse.EventBus).
+EVENT_CHANNEL = "exposure_events"
+# The events that close an exposure: its stream ends after sending one.
+TERMINAL_EVENTS = ("exposure_superseded", "exposure_cancelled", "exposure_deployed")
+
 
 def origin_of(row: ServiceRow | PublishedOriginRow) -> Origin:
     return (row.scheme, row.host, row.port)
@@ -309,7 +314,32 @@ async def emit_exposure_event(
     )
     session.add(row)
     await session.flush()
+    # Ids only, as for scan events: a payload can exceed NOTIFY's 8000 bytes.
+    await session.execute(
+        select(func.pg_notify(EVENT_CHANNEL, f"{exposure_id}:{row.seq}:{event_type}"))
+    )
     return row
+
+
+def event_to_dict(row: ExposureEventRow) -> dict[str, Any]:
+    return {
+        "exposure_id": row.exposure_id,
+        "seq": str(row.seq),
+        "ts": row.ts,
+        "type": row.type,
+        "actor": row.actor,
+        "payload": row.payload,
+    }
+
+
+async def replay_events(session: AsyncSession, exposure_id: str, start_seq: int) -> list[ExposureEventRow]:
+    """The exposure's events from `start_seq` on, in order."""
+    rows = await session.execute(
+        select(ExposureEventRow)
+        .where(ExposureEventRow.exposure_id == exposure_id, ExposureEventRow.seq >= start_seq)
+        .order_by(ExposureEventRow.seq)
+    )
+    return list(rows.scalars())
 
 
 async def _add_grouping(

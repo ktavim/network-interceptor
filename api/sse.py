@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from core.db import ScanEventRow, _database_url
 from core.events import CHANNEL, TERMINAL_EVENTS, event_to_dict, parse_notification
+from core.exposures import EVENT_CHANNEL as EXPOSURE_CHANNEL
 
 logger = logging.getLogger(__name__)
 
@@ -23,11 +24,12 @@ def _asyncpg_dsn() -> str:
 
 
 class EventBus:
-    """Scan streams read events from the DB; a notification only wakes them."""
+    """Scan and exposure streams read events from the DB; a notification only wakes them."""
 
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]):
         self._session_factory = session_factory
         self._wakers: Dict[str, Set[asyncio.Event]] = {}
+        self._exposure_wakers: Dict[str, Set[asyncio.Event]] = {}
         self._notification_subscribers: Set[asyncio.Queue] = set()
         self._terminal: asyncio.Queue = asyncio.Queue()
 
@@ -41,6 +43,16 @@ class EventBus:
             if not wakers:
                 del self._wakers[scan_id]
 
+    def subscribe_exposure(self, exposure_id: str, wake: asyncio.Event) -> None:
+        self._exposure_wakers.setdefault(exposure_id, set()).add(wake)
+
+    def unsubscribe_exposure(self, exposure_id: str, wake: asyncio.Event) -> None:
+        wakers = self._exposure_wakers.get(exposure_id)
+        if wakers is not None:
+            wakers.discard(wake)
+            if not wakers:
+                del self._exposure_wakers[exposure_id]
+
     def subscribe_notifications(self, queue: asyncio.Queue) -> None:
         self._notification_subscribers.add(queue)
 
@@ -48,9 +60,18 @@ class EventBus:
         self._notification_subscribers.discard(queue)
 
     def _wake_all(self) -> None:
-        for wakers in self._wakers.values():
+        for wakers in (*self._wakers.values(), *self._exposure_wakers.values()):
             for wake in wakers:
                 wake.set()
+
+    def _on_exposure_notify(self, _conn, _pid, _channel, payload: str) -> None:
+        try:
+            exposure_id, _seq, _type = parse_notification(payload)
+        except ValueError:
+            logger.warning("Ignoring malformed %s notification: %r", EXPOSURE_CHANNEL, payload)
+            return
+        for wake in self._exposure_wakers.get(exposure_id, ()):
+            wake.set()
 
     # A plain def: asyncpg runs sync callbacks in arrival order.
     def _on_notify(self, _conn, _pid, _channel, payload: str) -> None:
@@ -92,6 +113,7 @@ class EventBus:
                 try:
                     conn = await asyncpg.connect(_asyncpg_dsn())
                     await conn.add_listener(CHANNEL, self._on_notify)
+                    await conn.add_listener(EXPOSURE_CHANNEL, self._on_exposure_notify)
                     delay = 1.0
                     # Whatever was emitted while disconnected woke no one.
                     self._wake_all()

@@ -5,10 +5,13 @@ Read-only so far. Every endpoint here will require the `admin` role; like the
 rest of the API it is unauthenticated until real identity replaces the /me
 stub, and must not reach production before then.
 """
+import asyncio
+import json
 from datetime import datetime
 from typing import List, Optional
 
 from fastapi import APIRouter, HTTPException, Query, Request
+from sse_starlette.sse import EventSourceResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -169,3 +172,55 @@ async def get_exposure(exposure_id: str, request: Request) -> ExposureDetail:
         supersedes=supersedes,
         superseded_by=exposure.superseded_by_id,
     )
+
+
+@router.get("/exposures/{exposure_id}/events")
+async def exposure_events(exposure_id: str, request: Request):
+    """The exposure's event log as a server-sent event stream: every admin
+    action, and every step the agent reports. Resumes after `Last-Event-ID`.
+    A closed exposure's stream replays and ends; an open one's ends after the
+    event that closes it."""
+    factory = _session_factory(request)
+    bus = request.app.state.event_bus
+
+    async with factory() as session:
+        exposure = await session.get(ExposureRow, exposure_id)
+    if exposure is None:
+        raise HTTPException(status_code=404, detail={"message": "exposure not found"})
+
+    last_event_id = request.headers.get("Last-Event-ID")
+    try:
+        start_seq = int(last_event_id) + 1 if last_event_id else 0
+    except (TypeError, ValueError):
+        start_seq = 0
+
+    closed = exposure.status in [s.value for s in CLOSED_EXPOSURE_STATUSES]
+
+    # Subscribed before the first read, so no wake-up is missed in between.
+    wake = asyncio.Event()
+    if not closed:
+        bus.subscribe_exposure(exposure_id, wake)
+
+    async def event_gen():
+        next_seq = start_seq
+        try:
+            while True:
+                wake.clear()
+                async with factory() as session:
+                    rows = await exposures.replay_events(session, exposure_id, next_seq)
+                for row in rows:
+                    yield {"id": str(row.seq), "data": json.dumps(exposures.event_to_dict(row))}
+                    next_seq = row.seq + 1
+                    if row.type in exposures.TERMINAL_EVENTS:
+                        return
+                if closed or await request.is_disconnected():
+                    return
+                try:
+                    await asyncio.wait_for(wake.wait(), timeout=15.0)
+                except asyncio.TimeoutError:
+                    yield {"comment": "keepalive"}
+        finally:
+            if not closed:
+                bus.unsubscribe_exposure(exposure_id, wake)
+
+    return EventSourceResponse(event_gen())
