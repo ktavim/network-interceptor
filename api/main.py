@@ -10,8 +10,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from config_tracer.settings import ScanSettings
 from core.db import make_engine, make_session_factory
 
+from .routes_agent import router as agent_router
 from .routes_apps import router as apps_router
 from .routes_events import router as events_router
+from .routes_exposures import router as exposures_router
 from .routes_published_origins import router as published_origins_router
 from .routes_scans import router as scans_router
 from .routes_me import router as me_router
@@ -76,6 +78,8 @@ app.include_router(scans_router, prefix="/api")
 app.include_router(apps_router, prefix="/api")
 app.include_router(events_router, prefix="/api")
 app.include_router(published_origins_router, prefix="/api")
+app.include_router(exposures_router, prefix="/api")
+app.include_router(agent_router, prefix="/api")
 app.include_router(me_router, prefix="/api")
 
 

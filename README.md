@@ -114,12 +114,22 @@ All under `/api`, except `/health`.
 | `GET` | `/notifications` | Server-sent event stream across all scans |
 | `GET`, `POST` | `/published-origins` | Origins already published through the F5 (`?include_removed=true` adds removed ones); register one (`scheme`, `host`, `port`, `note`) |
 | `DELETE` | `/published-origins/{id}` | Remove a registration. Scans completed while it was active keep their verdicts |
+| `PATCH` | `/published-origins/{id}` | Set the `url` (HTTPS) of the VIP that publishes the origin, which apps that call it are rewritten to |
+| `GET` | `/exposures` | The exposure queue: open exposures, oldest submission first. `?status=` (repeatable) lists those statuses instead, newest first |
+| `GET` | `/exposures/{id}` | One exposure: its groups, every service of its scan with its `scope`, `warnings` and registry entry, and `blocked_by`, what blocks planning |
+| `PUT` | `/exposures/{id}/groups` | Replace the grouping (`version`, `groups`: each `service_ids` and, to keep an existing group, its `id`). 409 with the current `status` and `version` when the version is stale or the exposure is past confirmation; 422 with an error per service unless each service that needs a VIP is in exactly one group |
+| `POST` | `/exposures/{id}/plan`, `/confirm`, `/retry`, `/cancel` | Request a plan, confirm it (`plan_hash`), retry a failed phase, or cancel. Each body names the `version`; 409 with the current `status` and `version` when the exposure's status or version does not allow it, and with `blocked_by` when something blocks planning |
+| `GET` | `/agent/pending` | For the deployment agent: the exposures in `planning`, `deploying` or `cancelling`, each with what that phase needs |
+| `POST` | `/agent/exposures/{id}/events`, `/result` | For the agent: report a step (numbered by the agent, a repeat recorded once), and the outcome of a phase for a version (dropped if stale): a planning result carries the `plan`, a deploying one the `deployment`'s references |
+| `GET` | `/exposures/{id}/events` | The exposure's event log as a server-sent event stream: each event's `type`, `actor`, `ts` and `payload`. Resumes from `Last-Event-ID`; a closed exposure's stream replays and ends |
 | `GET` | `/me` | The current user. A stub: there is no real auth flow. |
 | `GET` | `/health` | `{"status": "ok"}` |
 
 A service's `sources` is everywhere the scanners found its origin, folded over its URLs into one list of `{kind, value}`, deduplicated and sorted by kind then value. The tracer's kinds are `network`, `js` and `dom` (a config, bundle or page element that named a URL of the origin), `redirect` (a probed URL that redirected to it) and `synthesized` (the origin's root, which the tracer probed on its own after the URL named answered 4xx). `page` is the interceptor's: a page the browser called the origin from. The per-URL `sources` on `/urls` are the tracer's raw strings, one row at a time.
 
 A service's `severity` is `blocker`, `review` or `cleared`, derived from its `auth_method`, or `published`: the origin is already published through the F5, by a workaround the scanners cannot see, so nothing is left to configure, where `cleared` means the F5 can publish it and someone still has to. `published` comes only from the published-origins registry, one list for every app keyed by scheme, host and port, and it overrides whatever method was detected, so a service can read `ntlm` with `published`; its `published_origin` names the entry, and each scanner's `findings` keep the severity its own method implies. The registry is read when a scan's verdicts are computed, as each of its jobs ends. A scan completed before an entry was added or removed keeps its verdicts; rescan to see the change. Removing an entry is a soft delete: a service on a submitted scan keeps pointing at the entry, with its `removed_at` set.
+
+Submitting a scan also creates its **exposure**, the F5 admins' work of publishing the app (docs/exposure-design.md), in the same transaction. It starts in `grouping`, with the services that need a VIP grouped one VIP per host. An app has at most one open exposure: a new submission supersedes it and keeps its grouping for the origins the two share. An exposure's scope is worked out against the published-origins registry as it is when read, not as it was at the scan: an origin registered since is `published`, and one whose entry was removed since falls back on its own auth method. Requesting a plan hands the exposure to the deployment agent (the `exposure-agent` repository), which pulls its work from `/api/agent/*`. A new submission supersedes the app's open exposure: at once if it never asked for a plan, otherwise through `cancelling`, for the agent to release what it holds. An exposure that is deploying is left to finish, and the new one cannot be planned until it has. When a deploy succeeds, the backend registers each origin it published, the app's own included, with the URL that replaces it and the exposure's id, and takes those origins out of the other open exposures' groupings, dropping their plans, so that no origin gets two VIPs. The exposure and agent endpoints have no authentication yet, and must not reach production until they do.
 
 ## Configuration
 
@@ -175,4 +185,5 @@ worker/         __main__.py picks the scanner from WORKER_SCANNER; job.py has on
 alembic/        migrations, driven by DATABASE_URL
 scripts/e2e.py  end-to-end smoke test
 tests/          unit/, tracer/, integration/
+docs/           design notes; exposure-design.md plans publishing submitted apps through the F5
 ```

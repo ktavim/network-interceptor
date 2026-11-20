@@ -1,5 +1,5 @@
 import uuid
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, HTTPException, Request
 from sqlalchemy import func, select
@@ -50,42 +50,49 @@ def _unresolved_count_subq():
 async def list_apps(request: Request) -> List[AppSummary]:
     factory = _session_factory(request)
     async with factory() as session:
-        # Most recent scan per app, by started_at desc.
-        latest_subq = (
-            select(
-                ScanRow.app_id.label("app_id"),
-                func.max(ScanRow.started_at).label("latest_started_at"),
-            )
-            .group_by(ScanRow.app_id)
-            .subquery()
+        return await _app_summaries(session)
+
+
+async def _app_summaries(session: AsyncSession, app_id: Optional[str] = None) -> List[AppSummary]:
+    """Every app, newest first, or only the one with `app_id`, each with its latest scan."""
+    # Most recent scan per app, by started_at desc.
+    latest_subq = (
+        select(
+            ScanRow.app_id.label("app_id"),
+            func.max(ScanRow.started_at).label("latest_started_at"),
         )
-        unresolved = _unresolved_count_subq()
-        stmt = (
-            select(
-                AppRow,
-                ScanRow,
-                func.coalesce(unresolved.c.unresolved_count, 0),
-            )
-            .outerjoin(latest_subq, latest_subq.c.app_id == AppRow.id)
-            .outerjoin(
-                ScanRow,
-                (ScanRow.app_id == AppRow.id)
-                & (ScanRow.started_at == latest_subq.c.latest_started_at),
-            )
-            .outerjoin(unresolved, unresolved.c.scan_id == ScanRow.id)
-            .order_by(AppRow.created_at.desc())
+        .group_by(ScanRow.app_id)
+        .subquery()
+    )
+    unresolved = _unresolved_count_subq()
+    stmt = (
+        select(
+            AppRow,
+            ScanRow,
+            func.coalesce(unresolved.c.unresolved_count, 0),
         )
-        result = await session.execute(stmt)
-        out: list[AppSummary] = []
-        for app, scan, unresolved_total in result.all():
-            out.append(
-                app_to_summary(
-                    app,
-                    last_scan=scan,
-                    last_scan_unresolved_count=int(unresolved_total or 0),
-                )
+        .outerjoin(latest_subq, latest_subq.c.app_id == AppRow.id)
+        .outerjoin(
+            ScanRow,
+            (ScanRow.app_id == AppRow.id)
+            & (ScanRow.started_at == latest_subq.c.latest_started_at),
+        )
+        .outerjoin(unresolved, unresolved.c.scan_id == ScanRow.id)
+        .order_by(AppRow.created_at.desc())
+    )
+    if app_id is not None:
+        stmt = stmt.where(AppRow.id == app_id)
+    result = await session.execute(stmt)
+    out: list[AppSummary] = []
+    for app, scan, unresolved_total in result.all():
+        out.append(
+            app_to_summary(
+                app,
+                last_scan=scan,
+                last_scan_unresolved_count=int(unresolved_total or 0),
             )
-        return out
+        )
+    return out
 
 
 @router.post("/apps", response_model=AppSummary, status_code=201)
